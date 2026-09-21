@@ -71,23 +71,39 @@ TRAIN_WINDOW = 252          # rolling walk-forward window, in daily bars
 WF_STEP = 10                # refit cadence for VALIDATION (production refits nightly)
 CONFORMAL_CALIB_DAYS = 250  # trailing window used to calibrate the range heads
 
-# --- Per-feature IC pre-filter ---------------------------------------------
-# Before a head is fitted, every feature's mean daily cross-sectional Spearman
-# IC against that head's target is computed ON THE TRAINING WINDOW ONLY, and
-# features with |IC| below the threshold are dropped. Each walk-forward fold
-# re-selects on its own window, so the filter is as leak-free as the fit.
-IC_FILTER = True
-IC_THRESHOLD = 0.03         # keep features with mean |daily rank IC| >= this
-IC_MIN_FEATURES = 30        # never go below this many: fall back to top-|IC|
+# --- Feature pre-selection --------------------------------------------------
+# Before a head is fitted, features are selected ON THE TRAINING WINDOW ONLY;
+# each walk-forward fold re-selects on its own window, so the filter is as
+# leak-free as the fit. Two selectors are available:
+#
+#   'lasso'  ElasticNet L1 path. Inside a block of correlated features the L1
+#            penalty keeps a representative and zeroes the rest -- the failure
+#            mode of 'ic' (keeping the whole volatility block) cannot happen.
+#            For the selection head, features AND target are z-scored within
+#            each date first, so the path picks what explains the CROSS-SECTION,
+#            not the market level.
+#   'ic'     univariate: keep features with mean daily |rank IC| >= threshold.
+#            Best for the 1d heads (timing / range) -- but it killed the
+#            selection head's RankIC (see README).
+#   'off'    all features go in (minus any per-head exclude list).
+#
+# None = each head uses its own default from models.HEADS (selection: 'off'
+# with the curated pool; timing/range: 'ic'). Setting a value here overrides
+# every head at once -- an experiment knob, not the normal configuration.
+FEATURE_SELECTOR = None
+IC_THRESHOLD = 0.03         # 'ic': keep features with mean |daily rank IC| >= this
+IC_MIN_FEATURES = 30        # 'ic': never go below this many (fall back to top-|IC|)
+LASSO_MAX_FEATURES = 100    # 'lasso': densest point on the path that is kept
+LASSO_MIN_FEATURES = 30     # 'lasso': walk further down the path to reach this
+LASSO_L1_RATIO = 0.9        # 1.0 = pure lasso; <1 adds L2, stabler within blocks
 
 # Per-head hyperparameter overrides on top of LGB_PARAMS (from `main.py tune`,
-# 20 random-search trials/head at wf_step=40 on IC-filtered features,
-# 2026-09-21; selection scored by RankIC, timing by AUC, ranges by pinball).
+# 20 random-search trials/head at wf_step=40, 2026-09-21). The range heads
+# were tuned under their final 'ic' selector and keep their overrides;
+# selection and timing were tuned under the abandoned IC-filtered setup, so
+# their stale overrides are dropped (LGB_PARAMS beats them under the final
+# feature policy) pending a re-tune.
 HEAD_PARAMS = {
-    'selection':  dict(min_child_samples=100, colsample_bytree=0.2, reg_alpha=1.0),
-    'timing':     dict(n_estimators=450, learning_rate=0.02, num_leaves=63,
-                       max_depth=8, min_child_samples=30, subsample=0.7,
-                       reg_alpha=1.0),
     'range_high': dict(num_leaves=15, max_depth=4, min_child_samples=100,
                        subsample=0.7, colsample_bytree=0.3, reg_alpha=0.3,
                        reg_lambda=3.0),

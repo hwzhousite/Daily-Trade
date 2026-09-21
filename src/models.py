@@ -14,11 +14,13 @@ embargo sized to their label horizon:
     range_high  quantile    -> q90 of tomorrow's high / close
     range_low   quantile    -> q10 of tomorrow's low  / close
 
-Before each fit, features are pre-filtered by mean daily cross-sectional
-Spearman IC against the head's target, computed on the training window only
-(config.IC_THRESHOLD / IC_MIN_FEATURES). Heads therefore train on DIFFERENT
-feature subsets. Per-head hyperparameters come from config.head_params(),
-which layers `main.py tune` results on top of LGB_PARAMS.
+Before each fit, features are pre-selected on the training window only
+(config.FEATURE_SELECTOR): 'lasso' walks an ElasticNet L1 path (per-date
+standardized for the cross-sectional selection head), 'ic' thresholds the
+mean daily |rank IC|, 'off' disables selection. Heads therefore train on
+DIFFERENT feature subsets. Per-head hyperparameters come from
+config.head_params(), which layers `main.py tune` results on top of
+LGB_PARAMS.
 """
 import os
 import joblib
@@ -30,12 +32,28 @@ from sklearn.metrics import (accuracy_score, brier_score_loss, log_loss,
                              mean_squared_error, roc_auc_score)
 
 import config
+import factors as _factors
 
+EPS = 1e-12
+
+# Per-head feature policy, settled by wf_step=40 comparisons (2026-09-21):
+#   selection   selector='off' + exclude: the curated 236-feature pool beat the
+#               158 baseline (RankIC +0.037 vs +0.031); both the univariate IC
+#               filter and the L1 path DESTROY its ranking signal, because
+#               LightGBM needs the very redundancy those selectors remove.
+#   timing/range selector='ic': beat 'lasso' on Brier/pinball across all three.
+# cs=True marks the head judged on cross-sectional ordering (the lasso
+# selector then standardizes features and target within each date).
+# config.FEATURE_SELECTOR, when set, overrides every head (for experiments).
 HEADS = {
-    'selection':  dict(task='regression', target='target_ret_7d',  horizon=7, embargo=7),
-    'timing':     dict(task='binary',     target='target_up_1d',   horizon=1, embargo=1),
-    'range_high': dict(task='quantile',   target='target_high_1d', horizon=1, embargo=1, alpha=0.90),
-    'range_low':  dict(task='quantile',   target='target_low_1d',  horizon=1, embargo=1, alpha=0.10),
+    'selection':  dict(task='regression', target='target_ret_7d',  horizon=7, embargo=7,
+                       cs=True, selector='off', exclude=_factors.SELECTION_EXCLUDE),
+    'timing':     dict(task='binary',     target='target_up_1d',   horizon=1, embargo=1,
+                       cs=False, selector='ic'),
+    'range_high': dict(task='quantile',   target='target_high_1d', horizon=1, embargo=1,
+                       alpha=0.90, cs=False, selector='ic'),
+    'range_low':  dict(task='quantile',   target='target_low_1d',  horizon=1, embargo=1,
+                       alpha=0.10, cs=False, selector='ic'),
 }
 
 
@@ -113,6 +131,52 @@ def select_features_ic(daily_ic, dates, threshold=None, min_features=None):
     if len(keep) < min_features:
         keep = ic.reindex(ic.abs().sort_values(ascending=False).index).head(min_features)
     return sorted(keep.index), ic
+
+
+def select_features_lasso(df_train, features, target, cross_sectional=False,
+                          max_features=None, min_features=None, l1_ratio=None):
+    """
+    ElasticNet L1-path feature selection on the training window.
+
+    Within a block of correlated features the L1 penalty keeps one
+    representative and zeroes the rest, which is exactly what the univariate
+    IC filter cannot do. The path is walked from the strongest penalty down;
+    we keep the densest support that still has <= max_features (and walk
+    further only if min_features hasn't been reached).
+
+    cross_sectional=True z-scores features AND target within each date first:
+    the market-level component of both disappears, so the path selects what
+    explains the cross-sectional ordering -- the thing a ranking head is for.
+    """
+    from sklearn.linear_model import enet_path
+
+    max_features = max_features or config.LASSO_MAX_FEATURES
+    min_features = min_features or config.LASSO_MIN_FEATURES
+    l1_ratio = l1_ratio or config.LASSO_L1_RATIO
+
+    X, y = df_train[features], df_train[target]
+    if cross_sectional:
+        g = df_train.groupby('Date')
+        Xz = (X - g[features].transform('mean')) / (g[features].transform('std') + EPS)
+        yz = (y - g[target].transform('mean')) / (g[target].transform('std') + EPS)
+    else:
+        Xz = (X - X.mean()) / (X.std() + EPS)
+        yz = (y - y.mean()) / (y.std() + EPS)
+    # 0 = the (per-date or global) mean: a neutral value, honest for "unknown".
+    Xz = Xz.fillna(0.0).values
+    yz = yz.fillna(0.0).values
+
+    alphas, coefs, _ = enet_path(Xz, yz, l1_ratio=l1_ratio, n_alphas=50, eps=3e-3)
+    support = np.abs(coefs) > 1e-10          # (n_features, n_alphas)
+    counts = support.sum(axis=0)             # path runs large alpha -> small
+
+    within = np.where(counts <= max_features)[0]
+    idx = within[-1] if len(within) else 0
+    if counts[idx] < min_features:
+        reach = np.where(counts >= min_features)[0]
+        idx = reach[0] if len(reach) else len(alphas) - 1
+
+    return sorted(f for f, keep in zip(features, support[:, idx]) if keep)
 
 
 def score_head(df, head, pred_col='prediction'):
@@ -196,7 +260,7 @@ def fit_conformal(wf_preds, head, calib_days=None):
 
 
 def walk_forward(panel, head_name, features=None, wf_step=None, train_window=None,
-                 params=None, verbose=True, ic_filter=None, daily_ic=None):
+                 params=None, verbose=True, selector=None, daily_ic=None):
     """
     Embargoed rolling walk-forward for one head.
 
@@ -204,22 +268,28 @@ def walk_forward(panel, head_name, features=None, wf_step=None, train_window=Non
     training bar must sit `embargo` bars before the test bar. Shrinking the
     embargo is the single easiest way to fabricate a good score here.
 
-    With ic_filter on (the default), every fold re-selects features by mean
-    daily |IC| computed on ITS OWN training window -- the filter sees exactly
-    what the fit sees, never the test period. Pass a precomputed `daily_ic`
-    (from daily_feature_ic) to avoid recomputing it across repeated calls.
+    With a feature selector on (config.FEATURE_SELECTOR, default 'lasso'),
+    every fold re-selects features on ITS OWN training window -- the selector
+    sees exactly what the fit sees, never the test period. For selector='ic',
+    pass a precomputed `daily_ic` (from daily_feature_ic) to avoid recomputing
+    it across repeated calls; 'lasso' runs per fold by construction.
     """
     head = HEADS[head_name]
     wf_step = wf_step or config.WF_STEP
     train_window = train_window or config.TRAIN_WINDOW
-    ic_filter = config.IC_FILTER if ic_filter is None else ic_filter
+    if selector is None:
+        selector = config.FEATURE_SELECTOR or head.get('selector', 'off')
     params = params if params is not None else config.head_params(head_name)
     embargo = head['embargo']
     target = head['target']
 
     df = panel.reset_index()
-    features = list(features) if features is not None else \
-        [c for c in df.columns if c not in set(config.NON_FEATURE_COLS)]
+    if features is not None:
+        features = list(features)
+    else:
+        features = [c for c in df.columns if c not in set(config.NON_FEATURE_COLS)]
+        excluded = set(head.get('exclude') or [])
+        features = [c for c in features if c not in excluded]
 
     df = df.dropna(subset=[target]).sort_values(['Date', 'Symbol'])
     dates = np.array(sorted(df['Date'].unique()))
@@ -227,7 +297,7 @@ def walk_forward(panel, head_name, features=None, wf_step=None, train_window=Non
     if start >= len(dates):
         raise ValueError(f"[{head_name}] need > {start} dates, panel has {len(dates)}")
 
-    if ic_filter and daily_ic is None:
+    if selector == 'ic' and daily_ic is None:
         daily_ic = daily_feature_ic(df, features, target)
 
     folds, n_feats_used = [], []
@@ -241,8 +311,11 @@ def walk_forward(panel, head_name, features=None, wf_step=None, train_window=Non
             continue
 
         fold_feats = features
-        if ic_filter:
+        if selector == 'ic':
             fold_feats, _ = select_features_ic(daily_ic, train_dates)
+        elif selector == 'lasso':
+            fold_feats = select_features_lasso(tr, features, target,
+                                               cross_sectional=head.get('cs', False))
         n_feats_used.append(len(fold_feats))
 
         model = _make_model(head, params)
@@ -255,36 +328,44 @@ def walk_forward(panel, head_name, features=None, wf_step=None, train_window=Non
 
     preds = pd.concat(folds).sort_values(['Date', 'Symbol']).reset_index(drop=True)
     metrics = score_head(preds, head)
-    if ic_filter:
+    if selector != 'off':
         metrics['n_features_mean'] = float(np.mean(n_feats_used))
     if verbose:
-        extra = f", {np.mean(n_feats_used):.0f}/{len(features)} feats" if ic_filter else ""
+        extra = f", {np.mean(n_feats_used):.0f}/{len(features)} feats" if selector != 'off' else ""
         print(f"  {format_metrics(head_name, metrics)}  ({len(folds)} folds, refit/{wf_step}d{extra})")
     return preds, metrics
 
 
 def fit_production(panel, head_name, features=None, params=None, save=True,
-                   conformal=None, wf_metrics=None, ic_filter=None):
+                   conformal=None, wf_metrics=None, selector=None):
     """
     Fits on all available history and persists a bundle with its metadata.
 
-    The IC filter here uses all history -- the production model only ever
+    Feature selection here uses all history -- the production model only ever
     predicts bars after its training window, so nothing leaks.
     """
     head = HEADS[head_name]
     target = head['target']
-    ic_filter = config.IC_FILTER if ic_filter is None else ic_filter
+    if selector is None:
+        selector = config.FEATURE_SELECTOR or head.get('selector', 'off')
     params = params if params is not None else config.head_params(head_name)
 
     df = panel.reset_index()
-    features = list(features) if features is not None else \
-        [c for c in df.columns if c not in set(config.NON_FEATURE_COLS)]
+    if features is not None:
+        features = list(features)
+    else:
+        features = [c for c in df.columns if c not in set(config.NON_FEATURE_COLS)]
+        excluded = set(head.get('exclude') or [])
+        features = [c for c in features if c not in excluded]
     df = df.dropna(subset=[target])
 
     n_features_raw = len(features)
-    if ic_filter:
+    if selector == 'ic':
         daily_ic = daily_feature_ic(df, features, target)
         features, _ = select_features_ic(daily_ic, daily_ic.index)
+    elif selector == 'lasso':
+        features = select_features_lasso(df, features, target,
+                                         cross_sectional=head.get('cs', False))
 
     model = _make_model(head, params)
     model.fit(df[features], df[target])
@@ -299,7 +380,7 @@ def fit_production(panel, head_name, features=None, params=None, save=True,
         'model': model, 'head': head_name, 'task': head['task'],
         'target': target, 'horizon_days': head['horizon'], 'embargo': head['embargo'],
         'alpha': head.get('alpha'), 'features': features,
-        'ic_filter': ic_filter, 'n_features_raw': n_features_raw,
+        'selector': selector, 'n_features_raw': n_features_raw,
         'lgb_params': dict(params),
         'trained_at': pd.Timestamp.now(tz='UTC').isoformat(),
         'train_rows': int(len(df)),
@@ -386,11 +467,12 @@ TUNE_SPACE = {
 }
 
 # What "better" means per task. Selection is judged on ranking, not MSE --
-# tuning it on MSE would reward predicting the market level, the exact
-# failure mode the IC filter exists to avoid.
+# tuning it on MSE would reward predicting the market level. Timing is judged
+# on Brier, not AUC: its deliverable is an HONEST probability (README), and an
+# AUC-picked config traded calibration away for ordering it barely has.
 TUNE_METRIC = {
     'regression': ('rank_ic', +1),
-    'binary':     ('auc', +1),
+    'binary':     ('brier', -1),
     'quantile':   ('pinball', -1),
 }
 
@@ -411,7 +493,8 @@ def tune_head(panel, head_name, n_trials=20, wf_step=None, seed=42, verbose=True
 
     df = panel.reset_index().dropna(subset=[head['target']])
     features = [c for c in df.columns if c not in set(config.NON_FEATURE_COLS)]
-    daily_ic = daily_feature_ic(df, features, head['target']) if config.IC_FILTER else None
+    sel = config.FEATURE_SELECTOR or head.get('selector', 'off')
+    daily_ic = daily_feature_ic(df, features, head['target']) if sel == 'ic' else None
 
     # learning_rate and n_estimators move together: halve one, double the other.
     def _n_estimators(lr):

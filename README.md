@@ -395,22 +395,32 @@ Range calibration    high 90.4%/90%, low 10.5%/10%
 | `WARMUP_DAYS` | 90 | 每币丢弃的预热行数 | 最长因子窗口是 200（`sma_ratio_200d`），90 之后它仍是 NaN，由 LightGBM 处理。调到 200 会损失约 10% 样本 |
 | `BENCHMARK_SYMBOL` | `'BTCUSDT'` | 基准 | 影响 `rel_ret_*`、`beta_bench_*` 因子和回测对照线 |
 
-### 模型层 — IC 特征预筛选
+### 模型层 — 按头特征策略
 
-每个头拟合前，先对每个特征计算**训练窗口内**的日度横截面 Spearman IC 均值
-（对该头自己的标签），`|IC| >= IC_THRESHOLD`（默认 0.03）的特征才进模型。
-walk-forward 的每一折都在自己的训练窗口上重新筛选——筛选器看到的信息和拟合完全
-一致，绝不触碰测试期。生产拟合用全历史筛选（生产模型只预测训练窗口之后的 bar）。
+三种筛选器都做过完整对照(每折只用自己的训练窗口,与拟合同等防泄漏),
+**结论是按头分治**,在 `models.HEADS` 里各自声明:
 
-| 参数 | 默认 | 说明 |
+| 头 | 策略 | wf_step=40 对照依据 |
 |---|---|---|
-| `IC_FILTER` | `True` | 关掉即恢复全 305 特征直入 |
-| `IC_THRESHOLD` | 0.03 | 各头过阈的特征数（全历史）：selection 82、timing 7、range_high 219、range_low 179 |
-| `IC_MIN_FEATURES` | 30 | 过阈不足时按 \|IC\| 取 top-N 保底（timing 头依赖这个） |
+| `selection` | **策展池 + 不筛**(305 − 69 个新增 A/B/D/F 族 = 236 特征直入) | 池 +0.037 > 158 基线 +0.031;IC 筛选 −0.005、Lasso +0.018 都是**负贡献** |
+| `timing` | IC 筛选(阈值 0.03,保底 top-30) | IC Brier 0.268 < Lasso 0.279 |
+| `range_high` | IC 筛选 | IC pinball 0.01018 < Lasso 0.01036 |
+| `range_low` | IC 筛选 | IC pinball 0.00767 < Lasso 0.00839 |
 
-已知权衡：单变量 IC 筛选会**整块保留相关的波动率特征**（它们对所有标签的边际
-IC 都最高），对 range 头是对的（pinball 改善），对 selection 头会把动量/流动性
-alpha 挤掉——见下方按头调参的结果表。
+**为什么 selection 不能筛**:LightGBM 的 `colsample` 依赖特征冗余——相关特征块让每棵树
+都能摸到同一信号的某个变体。单变量 IC 留下整块波动率特征(挤掉 alpha),L1 路径则把
+冗余消灭得太干净,两者都伤排序。真正有效的是**族级消融**:新增的 C 形态/E 振荡/
+G 主动买卖/H 衍生品/横截面/日历族单独加入都优于基线(+0.033~+0.041),
+A 动量/B 波动/D 趋势/F 量能族则拖累(+0.012~+0.029),于是只排除后者
+（`factors.SELECTION_EXCLUDE`，69 个）。
+
+配置项:`FEATURE_SELECTOR=None` 表示各头用自己的默认;设成 `'lasso'/'ic'/'off'`
+可全局覆盖做实验。`IC_THRESHOLD=0.03`、`IC_MIN_FEATURES=30`、
+`LASSO_MAX_FEATURES=100`、`LASSO_L1_RATIO=0.9`。
+
+**过拟合警示**:族的取舍是在同一段验证历史上决定的。族级(9 个自由度)比逐特征
+(305 个)稳健得多,且各族 t 值都在 2.5~5.6,但这仍是一次「用验证集做的选择」——
+新数据上跑几个月、RankIC 不掉,结论才算坐实。
 
 ### 模型层 — `LGB_PARAMS` 与按头调参
 

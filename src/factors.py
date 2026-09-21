@@ -404,6 +404,41 @@ def compute_factors(df):
 FACTOR_PREFIX_SKIP = {'Open', 'High', 'Low', 'Close', 'Volume', 'QuoteVolume',
                       'funding_daily', 'Symbol'}
 
+# The 2026-09-21 factor expansion, grouped by family. Family-level ablation on
+# the selection head (wf_step=40, vs the previous 158-feature baseline RankIC
+# +0.031) showed C/E/G/H/cross-sectional/calendar additions HELP ranking while
+# A/B/D/F additions hurt it; models.HEADS excludes the hurtful ones for the
+# selection head only. All heads keep the full panel available.
+V2_MOMENTUM = ([f'mom_accel_{w}d' for w in (7, 14, 30)] +
+               [f'sharpe_mom_{w}d' for w in (7, 14, 30, 60, 90)] +
+               [f'updays_frac_{w}d' for w in (5, 10, 21, 60)] +
+               [f'ret_skew_{w}d' for w in (14, 30, 60)] +
+               [f'ret_kurt_{w}d' for w in (14, 30, 60)] +
+               [f'max_ret_{w}d' for w in (14, 30)] +
+               [f'min_ret_{w}d' for w in (14, 30)] + ['ret_streak'])
+V2_VOLATILITY = ([f'upside_vol_{w}d' for w in (14, 30)] +
+                 [f'up_down_vol_ratio_{w}d' for w in (14, 30)] +
+                 [f'rogers_satchell_{w}d' for w in (14, 30)] +
+                 [f'atr_ratio_{w}d' for w in (14, 30)] +
+                 [f'vol_of_vol_{w}d' for w in (30, 60)] +
+                 [f'vol_z_{w}d' for w in (30, 90)])
+V2_TREND = ([f'price_slope_{w}d' for w in (10, 20, 50, 100)] +
+            [f'trend_r2_{w}d' for w in (20, 50)] +
+            [f'eff_ratio_{w}d' for w in (10, 30)] +
+            ['tsi', 'ppo', 'dpo_20', 'vortex_pos_14', 'vortex_neg_14',
+             'vortex_diff_14', 'cmo_14d', 'cmo_28d'])
+V2_VOLUME = ([f'cmf_{w}d' for w in (14, 30)] +
+             [f'ad_slope_{w}d' for w in (14, 30)] +
+             [f'force_z_{w}d' for w in (14, 30)] + ['eom_z_14'] +
+             [f'pv_corr_{w}d' for w in (14, 30, 60)] +
+             [f'vol_slope_{w}d' for w in (14, 30)] +
+             [f'upvol_frac_{w}d' for w in (14, 30)] +
+             [f'roll_spread_{w}d' for w in (14, 30)] +
+             ['amihud_z_30', 'turnover_z_30'])
+
+# What the selection head does NOT see (69 features).
+SELECTION_EXCLUDE = V2_MOMENTUM + V2_VOLATILITY + V2_TREND + V2_VOLUME
+
 
 def factor_columns(df):
     return [c for c in df.columns if c not in FACTOR_PREFIX_SKIP]
