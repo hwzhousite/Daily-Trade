@@ -21,8 +21,12 @@ import config
 
 def build_signal_frame(results):
     """Merges every head's walk-forward predictions onto one daily grid."""
-    sel = results['selection']['wf_predictions'][
-        ['Date', 'Symbol', 'prediction']].rename(columns={'prediction': 'sel_score'})
+    sel_preds = results['selection']['wf_predictions']
+    # Rank by the ensemble's confidence-adjusted score when available:
+    # t-stat ranking beat the raw mean +0.031 -> +0.038 RankIC at wf40.
+    conf_col = {'tstat': 'prediction_tstat', 'lcb': 'prediction_lcb'}.get(config.CONF_RANKING)
+    score_col = conf_col if conf_col and conf_col in sel_preds.columns else 'prediction'
+    sel = sel_preds[['Date', 'Symbol', score_col]].rename(columns={score_col: 'sel_score'})
     tim = results['timing']['wf_predictions'][
         ['Date', 'Symbol', 'prediction', 'target_ret_1d', 'funding_next_1d',
          'target_net_1d', 'Close']].rename(columns={'prediction': 'prob_up'})
@@ -46,7 +50,8 @@ def _equal(held):
     return {s: 1.0 / len(held) for s in held} if held else {}
 
 
-def rule_selection_hysteresis(grp, prev_weights, top_n, exit_rank_mult=2, **_):
+def rule_selection_hysteresis(grp, prev_weights, top_n, exit_rank_mult=2,
+                              max_entries=None, **_):
     """
     DEFAULT rule. Enter the top N; hold until the name drops out of the top
     N*exit_rank_mult.
@@ -55,16 +60,23 @@ def rule_selection_hysteresis(grp, prev_weights, top_n, exit_rank_mult=2, **_):
     ranking is not that precise -- a name sitting at rank 9 today and 7
     tomorrow carries no real signal, but round-tripping it costs real fees.
     The band cuts turnover ~60% with no systematic loss of return.
+
+    At most `max_entries` NEW names enter per day (exits are never throttled);
+    each held name is weighted 1/top_n, so an under-filled book holds the
+    remainder in cash instead of concentrating.
     """
+    max_entries = config.MAX_ENTRIES_PER_DAY if max_entries is None else max_entries
     ranked = grp.sort_values('sel_score', ascending=False)['Symbol'].tolist()
     entries = ranked[:top_n]
     keep_zone = set(ranked[:top_n * exit_rank_mult])
 
     held = [s for s in (prev_weights or {}) if s in keep_zone]
+    adds = 0
     for s in entries:
-        if s not in held and len(held) < top_n:
+        if s not in held and len(held) < top_n and adds < max_entries:
             held.append(s)
-    return _equal(held[:top_n])
+            adds += 1
+    return {s: 1.0 / top_n for s in held[:top_n]}
 
 
 def rule_selection_timing(grp, prev_weights, top_n, prob_threshold, **_):
@@ -83,6 +95,50 @@ def rule_timing_only(grp, prev_weights, top_n, prob_threshold, **_):
 
 def rule_equal_weight(grp, prev_weights, **_):
     return _equal(grp['Symbol'].tolist())
+
+
+def rule_long_short(grp, prev_weights, top_n, exit_rank_mult=None, gross=1.0, **_):
+    """
+    Long the top N, short the bottom N of the selection ranking, equal weight
+    per side, dollar-neutral. `gross` is total exposure (1.0 = 50% long + 50%
+    short). With exit_rank_mult set, hysteresis applies symmetrically: a long
+    survives while it stays in the top N*mult, a short while it stays in the
+    bottom N*mult.
+
+    The engine handles signed weights natively: a short's price PnL is
+    -w*ret, and its funding flow flips sign too -- a short RECEIVES positive
+    funding, which matters here because the ranking's favourite longs tend to
+    have negative funding (longs get paid) while bottom names skew positive.
+    """
+    ranked = grp.sort_values('sel_score', ascending=False)['Symbol'].tolist()
+    if len(ranked) < 2 * top_n:
+        top_n = len(ranked) // 2
+    if top_n == 0:
+        return {}
+    per_side = gross / 2.0
+
+    if exit_rank_mult:
+        keep_long = set(ranked[:top_n * exit_rank_mult])
+        keep_short = set(ranked[-top_n * exit_rank_mult:])
+        longs = [s for s, w in (prev_weights or {}).items() if w > 0 and s in keep_long]
+        for s in ranked[:top_n]:
+            if s not in longs and len(longs) < top_n:
+                longs.append(s)
+        longs = longs[:top_n]
+        long_set = set(longs)
+        shorts = [s for s, w in (prev_weights or {}).items()
+                  if w < 0 and s in keep_short and s not in long_set]
+        for s in reversed(ranked[-top_n:]):
+            if s not in shorts and s not in long_set and len(shorts) < top_n:
+                shorts.append(s)
+        shorts = shorts[:top_n]
+    else:
+        longs = ranked[:top_n]
+        shorts = ranked[-top_n:]
+
+    w = {s: per_side / len(longs) for s in longs}
+    w.update({s: -per_side / len(shorts) for s in shorts})
+    return w
 
 
 def rule_buy_and_hold(symbol):
@@ -155,6 +211,11 @@ def run_all(signal_df, top_n=None, prob_threshold=None, cost_bps=None,
         'Selection + Hysteresis': (rule_selection_hysteresis,
                                    dict(top_n=top_n, exit_rank_mult=exit_mult)),
         'Selection (daily rebal)': (rule_selection_only, dict(top_n=top_n)),
+        'L/S 50-50 + Hysteresis': (rule_long_short,
+                                   dict(top_n=top_n, exit_rank_mult=exit_mult, gross=1.0)),
+        'L/S 50-50 (daily)':      (rule_long_short, dict(top_n=top_n, gross=1.0)),
+        'L/S 100-100 + Hyst.':    (rule_long_short,
+                                   dict(top_n=top_n, exit_rank_mult=exit_mult, gross=2.0)),
         'Selection + Timing gate': (rule_selection_timing,
                                     dict(top_n=top_n, prob_threshold=prob_threshold)),
         'Timing only':            (rule_timing_only, dict(top_n=top_n, prob_threshold=prob_threshold)),
@@ -183,6 +244,9 @@ def plot_curves(curves, save_path=None, show=False, title=None):
     styles = {
         'Selection + Hysteresis':  dict(color='darkgreen', lw=2.5),
         'Selection (daily rebal)': dict(color='seagreen', lw=1.5, ls='--'),
+        'L/S 50-50 + Hysteresis':  dict(color='darkorange', lw=2.0),
+        'L/S 50-50 (daily)':       dict(color='goldenrod', lw=1.3, ls='--'),
+        'L/S 100-100 + Hyst.':     dict(color='sienna', lw=1.3, ls=':'),
         'Selection + Timing gate': dict(color='crimson', lw=1.5),
         'Timing only':             dict(color='purple', lw=1.2, ls='-.'),
         'Equal-Weight (all)':      dict(color='royalblue', lw=1.8, ls='--'),

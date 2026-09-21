@@ -49,8 +49,11 @@ def build_plan(signals, held, meta, capital=None, plans_dir=None, save=True):
                                 'expected_move': 'Pred_Band_1d'})
 
     held_set = set(held)
+    # 1/top_n per name, NOT 1/len(held): with the daily entry limit an
+    # under-filled book keeps the empty slots in cash instead of concentrating.
+    per_name = 1.0 / meta['top_n']
     plan['Target_Weight'] = plan['Symbol'].map(
-        lambda s: 1.0 / len(held_set) if s in held_set else 0.0)
+        lambda s: per_name if s in held_set else 0.0)
     plan['Target_Notional'] = plan['Target_Weight'] * capital
     plan['Target_Units'] = np.where(plan['Ref_Price'] > 0,
                                     plan['Target_Notional'] / plan['Ref_Price'], 0.0)
