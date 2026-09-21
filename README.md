@@ -426,20 +426,20 @@ A 动量/B 波动/D 趋势/F 量能族则拖累(+0.012~+0.029),于是只排除�
 
 超参基线在 `LGB_PARAMS`，按头覆盖在 `HEAD_PARAMS`（由 `main.py tune` 的随机搜索
 产生：每个 trial 跑一次完整的 embargo walk-forward，selection 按 RankIC、timing 按
-AUC、range 按 pinball 选优，wf_step=40 粗筛后在 wf_step=10 复核）。
+**Brier**、range 按 pinball 选优，wf_step=40 粗筛后在 wf_step=10 复核）。
 
-2026-09-21 的调参结果（20 trials/头，wf_step=40，IC 筛选开启）：
+2026-09-21 的调参结果（20 trials/头，wf_step=40，各头在**最终特征策略下**重调）：
 
-| 头 | 指标 | 默认超参 | 调优后 | 采纳的覆盖项 |
+| 头 | 指标 | LGB_PARAMS 基线 | 调优后 | 采纳的覆盖项 |
 |---|---|---|---|---|
-| selection | RankIC | −0.0053 | **+0.0071** | `min_child_samples=100, colsample_bytree=0.2, reg_alpha=1.0` |
-| timing | AUC | 0.5094 | **0.5112** | `n_estimators=450, lr=0.02, num_leaves=63, max_depth=8, min_child_samples=30, subsample=0.7, reg_alpha=1.0` |
-| range_high | pinball | 0.0103 | **0.0102** | `num_leaves=15, max_depth=4, min_child_samples=100, subsample=0.7, colsample=0.3, reg_alpha=0.3, reg_lambda=3.0` |
-| range_low | pinball | 0.0078 | **0.0077** | `num_leaves=15, max_depth=8, min_child_samples=100, subsample=0.9, colsample=0.3, reg_alpha=0.0, reg_lambda=3.0` |
+| selection | RankIC | +0.0369 | **+0.0417** | `450 树, lr=0.02, leaves=63, depth=8, mcs=30, subsample=0.7, α=1.0` |
+| timing | Brier | 0.2632 | **0.2561** | `leaves=15, depth=4, mcs=150, colsample=0.2, α=1.0, λ=0.5` |
+| range_high | pinball | 0.0103 | **0.0102** | `leaves=15, depth=4, mcs=100, subsample=0.7, colsample=0.3, α=0.3, λ=3.0` |
+| range_low | pinball | 0.0078 | **0.0077** | `leaves=15, depth=8, mcs=100, subsample=0.9, colsample=0.3, λ=3.0` |
 
-诚实的解读：range 头和 timing 的改善都在小数点第三位，各 trial 间的差异接近噪声；
-selection 从负转正但仍远低于 158 特征直入时代的 +0.03——**瓶颈在单变量 IC 筛选
-留下的相关波动率块，不在超参**。
+注意两点：selection 采纳的是高容量配置（63 叶、mcs=30），+0.005 的改善在 top-5
+trial 的散布（0.040~0.042）边缘，别指望全部兑现；timing 的调参目标是 **Brier 而非
+AUC**——这个头的职责是诚实概率，按 AUC 选优会拿校准换它几乎没有的排序能力。
 
 | 参数 | 默认 | 怎么调 |
 |---|---|---|

@@ -98,12 +98,16 @@ LASSO_MIN_FEATURES = 30     # 'lasso': walk further down the path to reach this
 LASSO_L1_RATIO = 0.9        # 1.0 = pure lasso; <1 adds L2, stabler within blocks
 
 # Per-head hyperparameter overrides on top of LGB_PARAMS (from `main.py tune`,
-# 20 random-search trials/head at wf_step=40, 2026-09-21). The range heads
-# were tuned under their final 'ic' selector and keep their overrides;
-# selection and timing were tuned under the abandoned IC-filtered setup, so
-# their stale overrides are dropped (LGB_PARAMS beats them under the final
-# feature policy) pending a re-tune.
+# 20 random-search trials/head at wf_step=40, 2026-09-21, each head tuned
+# under its FINAL feature policy: selection on the curated pool by RankIC
+# (+0.037 -> +0.042), timing under 'ic' by Brier (0.263 -> 0.256), ranges
+# under 'ic' by pinball).
 HEAD_PARAMS = {
+    'selection':  dict(n_estimators=450, learning_rate=0.02, num_leaves=63,
+                       max_depth=8, min_child_samples=30, subsample=0.7,
+                       reg_alpha=1.0),
+    'timing':     dict(num_leaves=15, max_depth=4, min_child_samples=150,
+                       colsample_bytree=0.2, reg_alpha=1.0, reg_lambda=0.5),
     'range_high': dict(num_leaves=15, max_depth=4, min_child_samples=100,
                        subsample=0.7, colsample_bytree=0.3, reg_alpha=0.3,
                        reg_lambda=3.0),
