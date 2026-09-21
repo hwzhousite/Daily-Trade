@@ -413,7 +413,20 @@ alpha 挤掉——见下方按头调参的结果表。
 
 超参基线在 `LGB_PARAMS`，按头覆盖在 `HEAD_PARAMS`（由 `main.py tune` 的随机搜索
 产生：每个 trial 跑一次完整的 embargo walk-forward，selection 按 RankIC、timing 按
-AUC、range 按 pinball 选优，wf_step=40 粗筛后应在 wf_step=10 复核）。
+AUC、range 按 pinball 选优，wf_step=40 粗筛后在 wf_step=10 复核）。
+
+2026-09-21 的调参结果（20 trials/头，wf_step=40，IC 筛选开启）：
+
+| 头 | 指标 | 默认超参 | 调优后 | 采纳的覆盖项 |
+|---|---|---|---|---|
+| selection | RankIC | −0.0053 | **+0.0071** | `min_child_samples=100, colsample_bytree=0.2, reg_alpha=1.0` |
+| timing | AUC | 0.5094 | **0.5112** | `n_estimators=450, lr=0.02, num_leaves=63, max_depth=8, min_child_samples=30, subsample=0.7, reg_alpha=1.0` |
+| range_high | pinball | 0.0103 | **0.0102** | `num_leaves=15, max_depth=4, min_child_samples=100, subsample=0.7, colsample=0.3, reg_alpha=0.3, reg_lambda=3.0` |
+| range_low | pinball | 0.0078 | **0.0077** | `num_leaves=15, max_depth=8, min_child_samples=100, subsample=0.9, colsample=0.3, reg_alpha=0.0, reg_lambda=3.0` |
+
+诚实的解读：range 头和 timing 的改善都在小数点第三位，各 trial 间的差异接近噪声；
+selection 从负转正但仍远低于 158 特征直入时代的 +0.03——**瓶颈在单变量 IC 筛选
+留下的相关波动率块，不在超参**。
 
 | 参数 | 默认 | 怎么调 |
 |---|---|---|

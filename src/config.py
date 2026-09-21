@@ -81,8 +81,20 @@ IC_THRESHOLD = 0.03         # keep features with mean |daily rank IC| >= this
 IC_MIN_FEATURES = 30        # never go below this many: fall back to top-|IC|
 
 # Per-head hyperparameter overrides on top of LGB_PARAMS (from `main.py tune`,
-# selected on IC-filtered features via the embargoed walk-forward).
-HEAD_PARAMS = {}
+# 20 random-search trials/head at wf_step=40 on IC-filtered features,
+# 2026-09-21; selection scored by RankIC, timing by AUC, ranges by pinball).
+HEAD_PARAMS = {
+    'selection':  dict(min_child_samples=100, colsample_bytree=0.2, reg_alpha=1.0),
+    'timing':     dict(n_estimators=450, learning_rate=0.02, num_leaves=63,
+                       max_depth=8, min_child_samples=30, subsample=0.7,
+                       reg_alpha=1.0),
+    'range_high': dict(num_leaves=15, max_depth=4, min_child_samples=100,
+                       subsample=0.7, colsample_bytree=0.3, reg_alpha=0.3,
+                       reg_lambda=3.0),
+    'range_low':  dict(num_leaves=15, max_depth=8, min_child_samples=100,
+                       subsample=0.9, colsample_bytree=0.3, reg_alpha=0.0,
+                       reg_lambda=3.0),
+}
 
 
 def head_params(head):
