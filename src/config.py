@@ -71,6 +71,26 @@ TRAIN_WINDOW = 252          # rolling walk-forward window, in daily bars
 WF_STEP = 10                # refit cadence for VALIDATION (production refits nightly)
 CONFORMAL_CALIB_DAYS = 250  # trailing window used to calibrate the range heads
 
+# --- Per-feature IC pre-filter ---------------------------------------------
+# Before a head is fitted, every feature's mean daily cross-sectional Spearman
+# IC against that head's target is computed ON THE TRAINING WINDOW ONLY, and
+# features with |IC| below the threshold are dropped. Each walk-forward fold
+# re-selects on its own window, so the filter is as leak-free as the fit.
+IC_FILTER = True
+IC_THRESHOLD = 0.03         # keep features with mean |daily rank IC| >= this
+IC_MIN_FEATURES = 30        # never go below this many: fall back to top-|IC|
+
+# Per-head hyperparameter overrides on top of LGB_PARAMS (from `main.py tune`,
+# selected on IC-filtered features via the embargoed walk-forward).
+HEAD_PARAMS = {}
+
+
+def head_params(head):
+    """LGB_PARAMS with any tuned per-head overrides applied."""
+    p = dict(LGB_PARAMS)
+    p.update(HEAD_PARAMS.get(head, {}))
+    return p
+
 # Columns that are never model inputs.
 NON_FEATURE_COLS = [
     'Date', 'Symbol', 'Open', 'High', 'Low', 'Close', 'Volume', 'QuoteVolume',

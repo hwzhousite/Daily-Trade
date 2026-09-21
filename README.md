@@ -245,7 +245,7 @@ scikit-learn 1.6.1   scipy 1.13.1   joblib 1.4.2   matplotlib 3.10.0   pyarrow 1
 
 notebook 另需 `jupyter` / `nbformat`。不再需要 `yfinance`。
 
-### 五个命令
+### 六个命令
 
 | 命令 | 做什么 | 耗时 |
 |---|---|---|
@@ -254,6 +254,7 @@ notebook 另需 `jupyter` / `nbformat`。不再需要 `yfinance`。
 | `main.py backtest` | 完整 walk-forward + 消融表 + 保形校准 | **~6 分钟** |
 | `main.py full` | backtest + 今晚计划 | ~7 分钟 |
 | `main.py download` | 只下载数据 | ~10 分钟 |
+| `main.py tune` | 每头随机搜索超参（`--trials`、`--heads` 可选） | ~20 分钟 |
 
 **为什么分开**：多一天数据对 walk-forward 验证的边际价值接近零，所以慢路径每周跑一次；
 但分位数头需要验证过的 walk-forward 来做保形校准，`nightly` 会复用上次 `backtest` 存进
@@ -265,7 +266,7 @@ bundle 的校准量。
 
 ```
 CryptoQuantPipeline/
-├── main.py                       CLI（五个命令）
+├── main.py                       CLI（六个命令）
 ├── README.md
 ├── src/
 │   ├── config.py                 ★ 所有参数都在这里
@@ -391,7 +392,28 @@ Range calibration    high 90.4%/90%, low 10.5%/10%
 | `WARMUP_DAYS` | 90 | 每币丢弃的预热行数 | 最长因子窗口是 200（`sma_ratio_200d`），90 之后它仍是 NaN，由 LightGBM 处理。调到 200 会损失约 10% 样本 |
 | `BENCHMARK_SYMBOL` | `'BTCUSDT'` | 基准 | 影响 `rel_ret_*`、`beta_bench_*` 因子和回测对照线 |
 
-### 模型层 — `LGB_PARAMS`
+### 模型层 — IC 特征预筛选
+
+每个头拟合前，先对每个特征计算**训练窗口内**的日度横截面 Spearman IC 均值
+（对该头自己的标签），`|IC| >= IC_THRESHOLD`（默认 0.03）的特征才进模型。
+walk-forward 的每一折都在自己的训练窗口上重新筛选——筛选器看到的信息和拟合完全
+一致，绝不触碰测试期。生产拟合用全历史筛选（生产模型只预测训练窗口之后的 bar）。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `IC_FILTER` | `True` | 关掉即恢复全 305 特征直入 |
+| `IC_THRESHOLD` | 0.03 | 各头过阈的特征数（全历史）：selection 82、timing 7、range_high 219、range_low 179 |
+| `IC_MIN_FEATURES` | 30 | 过阈不足时按 \|IC\| 取 top-N 保底（timing 头依赖这个） |
+
+已知权衡：单变量 IC 筛选会**整块保留相关的波动率特征**（它们对所有标签的边际
+IC 都最高），对 range 头是对的（pinball 改善），对 selection 头会把动量/流动性
+alpha 挤掉——见下方按头调参的结果表。
+
+### 模型层 — `LGB_PARAMS` 与按头调参
+
+超参基线在 `LGB_PARAMS`，按头覆盖在 `HEAD_PARAMS`（由 `main.py tune` 的随机搜索
+产生：每个 trial 跑一次完整的 embargo walk-forward，selection 按 RankIC、timing 按
+AUC、range 按 pinball 选优，wf_step=40 粗筛后应在 wf_step=10 复核）。
 
 | 参数 | 默认 | 怎么调 |
 |---|---|---|
@@ -563,8 +585,9 @@ BTCUSDT Buy&Hold               +19.33%   +9.12%  +0.418  -53.72%  0.001 +10.41% 
 **`FileNotFoundError: No trained 'selection' model`**
 先跑 `python3 main.py full`（或 `backtest`）。
 
-**`ValueError: Heads were trained on different feature sets`**
-因子层改过但只重训了部分头。跑一次 `main.py full` 让四个头一起重训。
+**`KeyError: Snapshot missing N features for head ...`**
+因子层改过但没重训。跑一次 `main.py full`（或 `backtest`）重训四个头。
+注：IC 筛选后各头的特征子集本来就不同，这是正常的，不是错误。
 
 **`Range calibration: not calibrated (run backtest)`**
 只跑过 `nightly` 没跑过 `backtest`。价格区间会偏窄约 5 个百分点。跑一次 `backtest`。
