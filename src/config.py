@@ -138,7 +138,13 @@ N_ENSEMBLE = 5             # bagged fits for the selection head (1 = single mode
 # 'tstat': rank by mean/std across the bag (confidence-weighted score)
 # 'lcb':   rank by mean - std (lower confidence bound)
 # 'off':   rank by the plain ensemble mean
-CONF_RANKING = 'tstat'
+#
+# Default 'off', decided by the wf10 ablation: tstat ranks BETTER on average
+# (RankIC +0.0269 vs +0.0184) and its instantaneous top-8 even earns more
+# (+0.234%/d vs +0.169%/d) -- but its ordering decays fast, so the hysteresis
+# book goes stale and turnover doubles (0.42 vs 0.26): strategy +20% vs +132%.
+# The mean ranking is sticky, which is what a hysteresis strategy needs.
+CONF_RANKING = 'off'
 
 # --- Strategy --------------------------------------------------------------
 TOP_N = 8                  # positions held from the selection ranking
