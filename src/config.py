@@ -49,8 +49,8 @@ BENCHMARK_SYMBOL = 'BTCUSDT'
 WARMUP_DAYS = 90            # head rows dropped per symbol (rolling warm-up)
 
 # --- Factors ---------------------------------------------------------------
-# 158 features: 132 single-asset (price / volume / microstructure / funding /
-# basis) + 26 cross-sectional & market. See src/factors.py for the families.
+# 305 features: 241 single-asset (price / volume / microstructure / funding /
+# basis / calendar) + 64 cross-sectional & market. See src/factors.py.
 FACTOR_PARAMS = {}          # factors.py owns its windows; kept for API symmetry
 
 # --- Model -----------------------------------------------------------------
@@ -61,7 +61,7 @@ LGB_PARAMS = dict(
     learning_rate=0.03,
     num_leaves=31,
     max_depth=6,
-    min_child_samples=50,      # main overfit brake with 158 features
+    min_child_samples=50,      # main overfit brake with 305 features
     subsample=0.8, subsample_freq=1,
     colsample_bytree=0.6,      # decorrelates trees across correlated factors
     reg_alpha=0.1, reg_lambda=1.0,
