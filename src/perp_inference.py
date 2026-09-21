@@ -45,24 +45,26 @@ def generate_signals(panel, top_n=None, prob_threshold=None, prev_holdings=None,
     snap, as_of = latest_rows(panel)
     bundles = {name: M.load_head(name) for name in M.HEADS}
 
-    feature_sets = {n: b['features'] for n, b in bundles.items()}
-    base = feature_sets['selection']
-    if any(fs != base for fs in feature_sets.values()):
-        raise ValueError("Heads were trained on different feature sets; retrain together.")
-    missing = [f for f in base if f not in snap.columns]
-    if missing:
-        raise KeyError(f"Snapshot missing {len(missing)} model features, e.g. {missing[:5]}")
+    # The IC pre-filter selects per head, so each head has its OWN feature
+    # subset; the snapshot only needs to cover each of them.
+    for n, b in bundles.items():
+        missing = [f for f in b['features'] if f not in snap.columns]
+        if missing:
+            raise KeyError(f"Snapshot missing {len(missing)} features for head "
+                           f"'{n}', e.g. {missing[:5]}. Re-run training after "
+                           f"a factor-layer change.")
 
-    X = snap[base]
+    def _X(name):
+        return snap[bundles[name]['features']]
+
     out = snap[['Symbol', 'Close']].copy()
-
-    out['sel_score_7d'] = bundles['selection']['model'].predict(X)
-    out['prob_up_1d'] = bundles['timing']['model'].predict_proba(X)[:, 1]
+    out['sel_score_7d'] = bundles['selection']['model'].predict(_X('selection'))
+    out['prob_up_1d'] = bundles['timing']['model'].predict_proba(_X('timing'))[:, 1]
 
     # Quantile heads + their conformal offsets.
     for head, label in [('range_high', 'high'), ('range_low', 'low')]:
         b = bundles[head]
-        raw = b['model'].predict(X)
+        raw = b['model'].predict(_X(head))
         delta = b.get('conformal_delta', 0.0) or 0.0
         out[f'{label}_ret'] = raw + delta
         out[f'{label}_price'] = out['Close'] * (1 + out[f'{label}_ret'])
@@ -112,7 +114,7 @@ def generate_signals(panel, top_n=None, prob_threshold=None, prev_holdings=None,
         'conformal': {n: b.get('conformal') for n, b in bundles.items()
                       if b.get('task') == 'quantile'},
         'wf_metrics': {n: b.get('wf_metrics') for n, b in bundles.items()},
-        'n_features': len(base),
+        'n_features': {n: len(b['features']) for n, b in bundles.items()},
     }
     return out, held, meta
 

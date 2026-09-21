@@ -81,8 +81,10 @@ def tonight(panel, top_n=None, capital=None, use_timing_gate=None,
         prev_holdings=prev_holdings, exit_rank_mult=exit_rank_mult,
         use_timing_gate=use_timing_gate)
 
+    nf = meta['n_features']
+    nf_txt = '/'.join(str(v) for v in nf.values()) if isinstance(nf, dict) else str(nf)
     print(f"as of {pd.Timestamp(meta['as_of']).date()} (UTC bar close) | "
-          f"{meta['n_universe']} symbols | {meta['n_features']} features")
+          f"{meta['n_universe']} symbols | {nf_txt} features per head")
     print(f"\n--- Next-day forecast (top {top_show} by 7d selection score) ---")
     print(pi.format_signals(signals, top_show).to_string(index=False))
 

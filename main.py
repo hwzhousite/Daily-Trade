@@ -12,6 +12,7 @@ CryptoQuantPipeline -- Binance USDT perpetuals.
     python main.py full           # backtest + tonight's plan
     python main.py download       # (re)download the universe only
     python main.py signals        # forecast from the saved models, no refit
+    python main.py tune           # per-head random search on IC-filtered features
 
 Run `nightly` after 00:15 UTC so the previous UTC day's bar is closed.
 All paths come from src/config.py and are anchored to this file's directory.
@@ -33,7 +34,12 @@ import perp_pipeline as P
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('command', choices=['nightly', 'backtest', 'full', 'download', 'signals'])
+    p.add_argument('command', choices=['nightly', 'backtest', 'full', 'download',
+                                       'signals', 'tune'])
+    p.add_argument('--trials', type=int, default=20,
+                   help='random-search trials per head for `tune` (default 20)')
+    p.add_argument('--heads', default='selection,timing,range_high,range_low',
+                   help='comma-separated heads to tune (default: all four)')
     p.add_argument('--no-refresh', action='store_true',
                    help='use the cached parquet instead of hitting Binance')
     p.add_argument('--wf-step', type=int, default=config.WF_STEP,
@@ -83,6 +89,19 @@ def main():
         P.run_full(refresh=not args.no_refresh, wf_step=args.wf_step,
                    cost_bps=args.cost_bps, show_plot=args.show_plot,
                    collect_short=not args.no_collect_short, **common)
+    elif args.command == 'tune':
+        import models as M
+        print(f"Project root: {config.PROJECT_ROOT}")
+        panel = P.load_panel(refresh=not args.no_refresh)
+        print(f"\nRandom search: {args.trials} trials/head at wf_step=40 "
+              f"(confirm winners at wf_step=10 with `backtest`)")
+        for head in args.heads.split(','):
+            head = head.strip()
+            print(f"\n--- tuning {head} ---")
+            best, trials = M.tune_head(panel, head, n_trials=args.trials)
+            keys = sorted(M.TUNE_SPACE) + ['n_estimators']
+            print(f"  best params: { {k: best[k] for k in keys} }")
+            print(f"  -> paste into config.HEAD_PARAMS['{head}'] to adopt")
     else:
         print(f"Project root: {config.PROJECT_ROOT}")
         panel = P.load_panel(refresh=not args.no_refresh)

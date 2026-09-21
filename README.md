@@ -1,6 +1,14 @@
 # CryptoQuantPipeline
 
-Binance USDT 永续合约的横截面选币策略。158 个因子、LightGBM 四头模型，每晚出次日预测和交易计划。
+Binance USDT 永续合约的横截面选币策略。305 个因子、LightGBM 四头模型，每晚出次日预测和交易计划。
+
+> **⚠️ 管线状态（2026-09-21）**：因子库已扩到 305，并加入 |IC|≥0.03 特征预筛选 + 按头调参。
+> wf_step=10 正式验证的结论是**分裂的**：range 头改善（pinball 0.0105→0.0102、0.0084→0.0078），
+> timing 概率质量略好（Brier 0.274→0.271），但 **selection 的 RankIC 掉到 −0.0015 (t=−0.22)，
+> 排序信号实质归零**——单变量 IC 筛选保留了一整块相关的波动率特征，把 alpha 挤掉了。
+> 同一次运行的策略回测 +97.6% (Sharpe 0.82) **不可信**：排序 IC 为零时的收益是路径运气。
+> 建议：对 selection 头豁免 IC 筛选（`IC_FILTER=False` 恢复全特征直入）或改用横截面
+> 定向的筛选标准。158 特征时代的可信基线是 RankIC +0.031、策略 +86%。
 
 > **当前回测**：默认策略 **+85.9%**（Sharpe 0.78），对比等权 +43.3%、BTC 买入持有 +19.3%。
 > 已扣除 10bps 单边手续费和真实资金费。
@@ -36,9 +44,9 @@ Binance USDT 永续合约的横截面选币策略。158 个因子、LightGBM 四
             ▼
    data/binance/{SYMBOL}.parquet        44 个币 × ~1095 天
             ▼
-   factors.compute_factors()            132 个单币因子
-   factors.add_cross_sectional()      + 26 个横截面/市场因子
-            ▼                          ═══ 158 个特征 ═══
+   factors.compute_factors()            241 个单币因子
+   factors.add_cross_sectional()      + 64 个横截面/市场因子
+            ▼                          ═══ 305 个特征 ═══
    factors.add_labels()                 7 个标签（含扣资金费的净收益）
             ▼
    ┌──────────────┬──────────────┬──────────────┬──────────────┐
@@ -136,28 +144,47 @@ P(up) 分档      样本数    次日平均收益
 
 ## 因子库
 
-158 个特征。完整定义见 [`src/factors.py`](src/factors.py)。
+305 个特征。完整定义见 [`src/factors.py`](src/factors.py)。
 
-### 单币因子（132）
+### 单币因子（241，含 2 个日历因子）
 
 | 族 | 数量 | 内容 |
 |---|---|---|
-| A 收益/动量 | 12 | 1/2/3/5/7/10/14/21/30/45/60/90 日对数收益 |
-| B 波动率 | 18 | 8 个窗口的收益标准差、3 个短长波动比、Parkinson(3)、Garman-Klass(2)、下行波动(2) |
-| C 区间/K线形态 | 15 | 高低幅、随机位置 %K(4)、实体比、上下影线、跳空 |
-| D 趋势/均线 | 22 | SMA 比(6)、EMA 比(4)、均线交叉(4)、MACD(3)、ADX(2)、Aroon(3) |
-| E 振荡/均值回归 | 16 | RSI(4)、KD(2)、Williams %R、CCI、Z-score(4)、布林带(4) |
-| F 成交量/流动性 | 19 | 量 Z-score、量比、对数成交额、OBV 斜率、MFI、VWAP 偏离、Amihud 非流动性、笔数 Z、平均单笔规模 |
-| G 主动买卖流 | 8 | 主动买入不平衡 `(2×takerBuy − vol)/vol` 的 5 个窗口 + Z-score + 按金额口径 2 个 |
-| H **衍生品** | 20 | **资金费率**：当日/3/7/14/30/60 日均值、Z-score、累计、为正比例、波动、变化率；**基差**：`(perp − spot)/spot` 的 5 个口径；永续/现货成交量比 |
+| A 收益/动量 | 35 | 12 窗口对数收益；**新增**：动量加速度(3)、滚动 Sharpe 动量(5)、上涨日占比(4)、收益偏度/峰度(6)、窗口内最大/最小单日收益(4)、连涨/连跌天数 |
+| B 波动率 | 30 | 8 窗口标准差、3 组短长比、Parkinson(3)、Garman-Klass(2)、下行波动(2)；**新增**：上行波动与上下行比(4)、Rogers-Satchell(2)、ATR 比(2)、波动率的波动(2)、波动 Z-score(2) |
+| C 区间/K线形态 | 27 | 高低幅、随机位置、实体比、影线、跳空；**新增**：距峰回撤/距谷反弹(4)、新高/新低距今天数(4)、区间 Z(2)、日内均值漂移(2) |
+| D 趋势/均线 | 38 | SMA/EMA 比、均线交叉、MACD、ADX、Aroon；**新增**：价格 OLS 斜率(4)、趋势 R²(2)、Kaufman 效率比(2)、TSI、PPO、DPO、Vortex(3)、CMO(2) |
+| E 振荡/均值回归 | 22 | RSI(4)、KD、Williams %R、CCI、Z-score(4)、布林带(4)；**新增**：Stoch-RSI、终极振荡器、Williams %R 28、CCI 50、Keltner 通道位置、布林 %B 100 |
+| F 成交量/流动性 | 37 | 量 Z、量比、成交额、OBV 斜率、MFI、VWAP、Amihud、笔数、单笔规模；**新增**：CMF(2)、A/D 线斜率(2)、Force Index Z(2)、EOM Z、量价相关(3)、量趋势斜率(2)、上涨日量占比(2)、Roll 隐含价差(2)、Amihud/换手 Z(2) |
+| G 主动买卖流 | 16 | 主动买入不平衡 5 窗口 + Z + 金额口径；**新增**：30 日 Z、变化量(2)、斜率、累计、与收益的滚动相关(2)、金额口径 Z |
+| H **衍生品** | 34 | 资金费率均值/Z/累计/为正比例/波动/变化率；基差 5 口径；永续/现货量比；**新增**：资金费 90/180 日分位(2)、30 日极值(2)、偏度、斜率、偏离、60 日为正比例；基差波动/变化/90 日分位(3)；量比 Z |
+| 日历 | 2 | 星期几的 sin/cos 编码（永续 7×24，周末效应真实存在） |
 
-### 横截面与市场因子（26）
+### 横截面与市场因子（64）
 
-`cs_rank_*`（10 个关键因子的每日百分位排名）、`cs_z_*`（3 个）、
-`mkt_*`（市场收益/波动/资金费/宽度/离散度，6 个）、
-`rel_ret_*_vs_bench`（相对 BTC 强度，2 个）、`beta_bench_*` / `corr_bench_*`（4 个）、`idio_vol_30d`。
+`cs_rank_*`（**30** 个关键因子的每日百分位排名，覆盖动量谱、风险调整动量、流动性、资金费、基差、回撤）、
+`cs_z_*`（8 个）、`mkt_*`（市场收益/波动/资金费/宽度/离散度/主动买卖/基差，**14** 个）、
+`exc_ret_*`（超额于市场均值，3 个）、`rel_ret_*_vs_bench`（相对 BTC，**4** 个）、
+`beta_bench_*` / `corr_bench_*`（4 个）、`idio_vol_30d`。
 
 横截面因子是排序模型真正需要的——一个孤立的动量值说不出这个币今天是不是最强的。
+
+### ⚠️ 特征数量与信号质量的权衡
+
+扩到 305 后的初步对照（同一面板、wf_step=40、19 折）：
+
+| 特征集 | selection RankIC | t 值 |
+|---|---|---|
+| 158（旧） | **+0.0306** | **+4.03** |
+| 305（默认超参） | +0.0027 | +0.34 |
+| 305（colsample 0.3） | +0.0112 | +1.43 |
+| 305（去掉新增市场级特征） | +0.0125 | +1.63 |
+
+新特征让 MSE 变好（0.0360→0.0342）但 RankIC 变差——模型把容量花在预测市场
+水平项上，牺牲了横截面排序。尝试过的正则化（colsample 0.2-0.3、min_child_samples
+100-150、更小的树）都只能部分恢复。**结论：因子库越大不等于信号越强**，用之前
+必须跑 `main.py backtest` 完整验证，且值得做按头特征筛选（比如 selection 头只喂
+横截面与相对特征）。
 
 ### 合约因子的历史深度问题（双轨）
 
@@ -221,7 +248,7 @@ scikit-learn 1.6.1   scipy 1.13.1   joblib 1.4.2   matplotlib 3.10.0   pyarrow 1
 
 notebook 另需 `jupyter` / `nbformat`。不再需要 `yfinance`。
 
-### 五个命令
+### 六个命令
 
 | 命令 | 做什么 | 耗时 |
 |---|---|---|
@@ -230,6 +257,7 @@ notebook 另需 `jupyter` / `nbformat`。不再需要 `yfinance`。
 | `main.py backtest` | 完整 walk-forward + 消融表 + 保形校准 | **~6 分钟** |
 | `main.py full` | backtest + 今晚计划 | ~7 分钟 |
 | `main.py download` | 只下载数据 | ~10 分钟 |
+| `main.py tune` | 每头随机搜索超参（`--trials`、`--heads` 可选） | ~20 分钟 |
 
 **为什么分开**：多一天数据对 walk-forward 验证的边际价值接近零，所以慢路径每周跑一次；
 但分位数头需要验证过的 walk-forward 来做保形校准，`nightly` 会复用上次 `backtest` 存进
@@ -241,12 +269,12 @@ bundle 的校准量。
 
 ```
 CryptoQuantPipeline/
-├── main.py                       CLI（五个命令）
+├── main.py                       CLI（六个命令）
 ├── README.md
 ├── src/
 │   ├── config.py                 ★ 所有参数都在这里
 │   ├── binance_data.py           下载 / 缓存 / 双轨采集
-│   ├── factors.py                158 个因子 + 标签 + 面板
+│   ├── factors.py                305 个因子 + 标签 + 面板
 │   ├── models.py                 LightGBM 四头 + embargo WF + 保形校准
 │   ├── perp_backtest.py          日频回测 + 资金费 + 消融组
 │   ├── perp_inference.py         今晚打分 + 迟滞仓位规则
@@ -305,7 +333,7 @@ BinanceError: No symbol downloaded successfully; cache untouched.
 
 **② as-of 日期对不对**
 ```
-as of 2026-09-19 (UTC bar close) | 44 symbols | 158 features
+as of 2026-09-19 (UTC bar close) | 44 symbols | 305 features
 ```
 应该是**昨天**（UTC）。如果是前天，说明你跑早了（UTC 午夜前）。
 
@@ -367,14 +395,58 @@ Range calibration    high 90.4%/90%, low 10.5%/10%
 | `WARMUP_DAYS` | 90 | 每币丢弃的预热行数 | 最长因子窗口是 200（`sma_ratio_200d`），90 之后它仍是 NaN，由 LightGBM 处理。调到 200 会损失约 10% 样本 |
 | `BENCHMARK_SYMBOL` | `'BTCUSDT'` | 基准 | 影响 `rel_ret_*`、`beta_bench_*` 因子和回测对照线 |
 
-### 模型层 — `LGB_PARAMS`
+### 模型层 — 按头特征策略
+
+三种筛选器都做过完整对照(每折只用自己的训练窗口,与拟合同等防泄漏),
+**结论是按头分治**,在 `models.HEADS` 里各自声明:
+
+| 头 | 策略 | wf_step=40 对照依据 |
+|---|---|---|
+| `selection` | **策展池 + 不筛**(305 − 69 个新增 A/B/D/F 族 = 236 特征直入) | 池 +0.037 > 158 基线 +0.031;IC 筛选 −0.005、Lasso +0.018 都是**负贡献** |
+| `timing` | IC 筛选(阈值 0.03,保底 top-30) | IC Brier 0.268 < Lasso 0.279 |
+| `range_high` | IC 筛选 | IC pinball 0.01018 < Lasso 0.01036 |
+| `range_low` | IC 筛选 | IC pinball 0.00767 < Lasso 0.00839 |
+
+**为什么 selection 不能筛**:LightGBM 的 `colsample` 依赖特征冗余——相关特征块让每棵树
+都能摸到同一信号的某个变体。单变量 IC 留下整块波动率特征(挤掉 alpha),L1 路径则把
+冗余消灭得太干净,两者都伤排序。真正有效的是**族级消融**:新增的 C 形态/E 振荡/
+G 主动买卖/H 衍生品/横截面/日历族单独加入都优于基线(+0.033~+0.041),
+A 动量/B 波动/D 趋势/F 量能族则拖累(+0.012~+0.029),于是只排除后者
+（`factors.SELECTION_EXCLUDE`，69 个）。
+
+配置项:`FEATURE_SELECTOR=None` 表示各头用自己的默认;设成 `'lasso'/'ic'/'off'`
+可全局覆盖做实验。`IC_THRESHOLD=0.03`、`IC_MIN_FEATURES=30`、
+`LASSO_MAX_FEATURES=100`、`LASSO_L1_RATIO=0.9`。
+
+**过拟合警示**:族的取舍是在同一段验证历史上决定的。族级(9 个自由度)比逐特征
+(305 个)稳健得多,且各族 t 值都在 2.5~5.6,但这仍是一次「用验证集做的选择」——
+新数据上跑几个月、RankIC 不掉,结论才算坐实。
+
+### 模型层 — `LGB_PARAMS` 与按头调参
+
+超参基线在 `LGB_PARAMS`，按头覆盖在 `HEAD_PARAMS`（由 `main.py tune` 的随机搜索
+产生：每个 trial 跑一次完整的 embargo walk-forward，selection 按 RankIC、timing 按
+**Brier**、range 按 pinball 选优，wf_step=40 粗筛后在 wf_step=10 复核）。
+
+2026-09-21 的调参结果（20 trials/头，wf_step=40，各头在**最终特征策略下**重调）：
+
+| 头 | 指标 | LGB_PARAMS 基线 | 调优后 | 采纳的覆盖项 |
+|---|---|---|---|---|
+| selection | RankIC | +0.0369 | **+0.0417** | `450 树, lr=0.02, leaves=63, depth=8, mcs=30, subsample=0.7, α=1.0` |
+| timing | Brier | 0.2632 | **0.2561** | `leaves=15, depth=4, mcs=150, colsample=0.2, α=1.0, λ=0.5` |
+| range_high | pinball | 0.0103 | **0.0102** | `leaves=15, depth=4, mcs=100, subsample=0.7, colsample=0.3, α=0.3, λ=3.0` |
+| range_low | pinball | 0.0078 | **0.0077** | `leaves=15, depth=8, mcs=100, subsample=0.9, colsample=0.3, λ=3.0` |
+
+注意两点：selection 采纳的是高容量配置（63 叶、mcs=30），+0.005 的改善在 top-5
+trial 的散布（0.040~0.042）边缘，别指望全部兑现；timing 的调参目标是 **Brier 而非
+AUC**——这个头的职责是诚实概率，按 AUC 选优会拿校准换它几乎没有的排序能力。
 
 | 参数 | 默认 | 怎么调 |
 |---|---|---|
-| `min_child_samples` | 50 | **158 个特征下最主要的过拟合刹车。** 调高（100-200）更保守；调低会让模型记住个别币的特异行为 |
+| `min_child_samples` | 50 | **305 个特征下最主要的过拟合刹车。** 调高（100-200）更保守；调低会让模型记住个别币的特异行为 |
 | `num_leaves` | 31 | 模型容量。与 `max_depth` 联动，`num_leaves < 2^max_depth` 才有意义 |
 | `max_depth` | 6 | 交互阶数上限。金融数据很少需要超过 6-8 |
-| `colsample_bytree` | 0.6 | **对 158 个高度相关的因子很关键**，降低树之间的相关性。0.4-0.7 都合理 |
+| `colsample_bytree` | 0.6 | **对 305 个高度相关的因子很关键**，降低树之间的相关性（初步对照中 0.3 略好于 0.6） |
 | `learning_rate` / `n_estimators` | 0.03 / 300 | 联动：lr 减半就把树数翻倍。当前组合约 0.3 秒/fit |
 | `reg_alpha` / `reg_lambda` | 0.1 / 1.0 | L1/L2。特征多时可以加大 |
 | `subsample` | 0.8 | 行采样，配合 `subsample_freq=1` 生效 |
@@ -464,6 +536,33 @@ python3 main.py signals --no-refresh --capital 50000 --no-save-plan   # 试算
 
 ## 回测结果
 
+### 2026-09-21：305 因子 + IC 筛选 + 调优超参（wf_step=10）
+
+```
+[selection]  RankIC -0.0015 (t=-0.22) | 140/305 特征     ← 排序信号归零，见顶部警告
+[timing]     AUC 0.5003 | Brier 0.2706 | 40/305 特征
+[range_high] pinball 0.01021 | 保形后覆盖 90.6%/90% | 187/305 特征
+[range_low]  pinball 0.00783 | 保形后覆盖 11.0%/10% | 186/305 特征
+```
+
+```
+                          Total Return    CAGR  Sharpe    MaxDD   换手  资金费   手续费
+Selection + Hysteresis         +97.61%  +39.99%  +0.816  -68.44%  0.241  -4.83%  17.78%   ← RankIC≈0，不可信
+Selection (daily rebal)        +66.90%  +28.79%  +0.712  -73.91%  0.613  -4.15%  45.30%
+Selection + Timing gate        +17.39%   +8.24%  +0.514  -81.67%  1.143  -2.80%  84.44%
+Timing only                    -53.05%  -31.16%  -0.140  -85.48%  1.164  +2.28%  86.04%
+Equal-Weight (all 44)          +43.30%  +19.45%  +0.608  -68.19%  0.002  +0.31%   0.15%
+BTCUSDT Buy&Hold               +19.33%   +9.12%  +0.418  -53.72%  0.001 +10.41%   0.10%
+```
+
+**为什么策略 +97.6% 却说不可信**：选币头的日度排序 IC 是 −0.0015（t=−0.22，
+统计上就是零）。一个没有排序能力的信号挑出的 8 币组合，两年 +97.6% 只能来自
+路径运气（迟滞规则恰好锁住了几只暴涨票）+ 资金费净收入扩大到 −4.83%。
+换一段历史、换一个随机种子都可能完全翻转。**模型层指标（RankIC 的 t 值）
+永远比策略层总收益更可信**——这正是两层分开验证的意义。
+
+### 历史基线：158 因子版本（wf_step=10，同一数据窗口）
+
 Walk-forward（`wf_step=10`，embargo 隔离），739 个交易日，44 个币，10bps 单边 + 真实资金费：
 
 ```
@@ -487,7 +586,7 @@ BTCUSDT Buy&Hold               +19.33%   +9.12%  +0.418  -53.72%  0.001 +10.41% 
 **怎么读**：
 
 - 选币层跑赢了等权（+43.3%）和 BTC（+19.3%），且 Sharpe 更高 —— 这和旧的 8 币 RF 管线
-  （跑输所有基准）是**定性的差别**。主要来自三件事：币种池 8→44、因子 6→158、模型 RF→LightGBM。
+  （跑输所有基准）是**定性的差别**。主要来自三件事：币种池 8→44、因子 6→158→305、模型 RF→LightGBM。
 - **资金费是净收入**（−3.06%），说明资金费因子在起作用，模型倾向于挑空头付钱的币。
   对照 BTC 买入持有付了 **+10.41%** 资金费。
 - 回撤 −65% 很大。这是满仓、只做多、8 个币的高波动组合，年化波动 78%。
@@ -539,8 +638,9 @@ BTCUSDT Buy&Hold               +19.33%   +9.12%  +0.418  -53.72%  0.001 +10.41% 
 **`FileNotFoundError: No trained 'selection' model`**
 先跑 `python3 main.py full`（或 `backtest`）。
 
-**`ValueError: Heads were trained on different feature sets`**
-因子层改过但只重训了部分头。跑一次 `main.py full` 让四个头一起重训。
+**`KeyError: Snapshot missing N features for head ...`**
+因子层改过但没重训。跑一次 `main.py full`（或 `backtest`）重训四个头。
+注：IC 筛选后各头的特征子集本来就不同，这是正常的，不是错误。
 
 **`Range calibration: not calibrated (run backtest)`**
 只跑过 `nightly` 没跑过 `backtest`。价格区间会偏窄约 5 个百分点。跑一次 `backtest`。

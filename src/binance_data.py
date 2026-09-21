@@ -22,6 +22,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 
 import config
@@ -234,8 +235,10 @@ def build_symbol_frame(symbol, start, end, with_spot=True, drop_incomplete=True)
             perp['SpotClose'] = spot['close']
             perp['SpotVolume'] = spot['volume']
         else:
-            perp['SpotClose'] = pd.NA
-            perp['SpotVolume'] = pd.NA
+            # float NaN, not pd.NA: pd.NA makes the column object dtype, which
+            # breaks rolling ops and LightGBM downstream.
+            perp['SpotClose'] = np.nan
+            perp['SpotVolume'] = np.nan
 
     # Funding only settles every 8h; a missing day means no settlement, i.e. zero.
     perp[['funding_daily', 'funding_mean']] = perp[['funding_daily', 'funding_mean']].fillna(0.0)

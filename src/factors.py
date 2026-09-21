@@ -1,19 +1,26 @@
 """
-Factor library: 150+ price/volume/microstructure/derivatives factors.
+Factor library: 305 price/volume/microstructure/derivatives factors.
 
 Every factor is computed from data observable AT or BEFORE the bar it is
 attached to. There is no bfill anywhere; the rolling warm-up period is dropped.
 
-Families
-    A  return / momentum          12
-    B  volatility                 18
-    C  range & candle structure   15
-    D  trend / moving average     22
-    E  oscillators / reversion    16
-    F  volume & liquidity         19
-    G  taker flow (microstructure) 8
-    H  derivatives (funding/basis) 20
-    I  cross-sectional & market   20   (computed across assets, see build_panel)
+Families (single-asset: 241)
+    A  return / momentum           35
+    B  volatility                  30
+    C  range & candle structure    27
+    D  trend / moving average      38
+    E  oscillators / reversion     22
+    F  volume & liquidity          37
+    G  taker flow (microstructure) 16
+    H  derivatives (funding/basis) 34
+       calendar (day-of-week)       2
+Cross-sectional & market: 64        (computed across assets, see build_panel)
+
+NOTE: walk-forward showed the 305-feature set DILUTES the selection head's
+RankIC versus the previous 158-feature set at default LGB_PARAMS (the new
+features improve MSE -- the market-level component -- at the expense of
+cross-sectional ordering). Re-run `main.py backtest` before trusting any
+strategy conclusion, and consider per-head feature selection.
 """
 import numpy as np
 import pandas as pd
@@ -88,9 +95,28 @@ def compute_factors(df):
 
     logret = np.log(c / c.shift(1))
 
-    # ---- A. return / momentum (12) ----
+    # ---- A. return / momentum ----
     for w in [1, 2, 3, 5, 7, 10, 14, 21, 30, 45, 60, 90]:
         f[f'ret_{w}d'] = logret.rolling(w).sum()
+    # momentum acceleration: this window's return vs the previous same window
+    for w in [7, 14, 30]:
+        f[f'mom_accel_{w}d'] = f[f'ret_{w}d'] - f[f'ret_{w}d'].shift(w)
+    # risk-adjusted momentum (rolling Sharpe of daily returns)
+    for w in [7, 14, 30, 60, 90]:
+        f[f'sharpe_mom_{w}d'] = logret.rolling(w).mean() / (logret.rolling(w).std() + EPS)
+    # sign consistency and extremes of the daily return distribution
+    for w in [5, 10, 21, 60]:
+        f[f'updays_frac_{w}d'] = (logret > 0).rolling(w).mean()
+    for w in [14, 30, 60]:
+        f[f'ret_skew_{w}d'] = logret.rolling(w).skew()
+        f[f'ret_kurt_{w}d'] = logret.rolling(w).kurt()
+    for w in [14, 30]:
+        f[f'max_ret_{w}d'] = logret.rolling(w).max()
+        f[f'min_ret_{w}d'] = logret.rolling(w).min()
+    # signed run length: +n after n consecutive up days, -n after n down days
+    sign = np.sign(logret)
+    runs = sign.groupby((sign != sign.shift()).cumsum()).cumcount() + 1
+    f['ret_streak'] = (runs * sign).astype(float)
 
     # ---- B. volatility (18) ----
     for w in [5, 7, 10, 14, 21, 30, 60, 90]:
@@ -107,6 +133,22 @@ def compute_factors(df):
         f[f'garman_klass_{w}d'] = np.sqrt(gk.rolling(w).mean().clip(lower=0))
     for w in [14, 30]:
         f[f'downside_vol_{w}d'] = logret.clip(upper=0).rolling(w).std()
+        f[f'upside_vol_{w}d'] = logret.clip(lower=0).rolling(w).std()
+        f[f'up_down_vol_ratio_{w}d'] = f[f'upside_vol_{w}d'] / (f[f'downside_vol_{w}d'] + EPS)
+    # Rogers-Satchell: drift-independent OHLC estimator
+    rs = np.log(h / (c + EPS)) * np.log(h / (o + EPS)) + \
+        np.log(l / (c + EPS)) * np.log(l / (o + EPS))
+    for w in [14, 30]:
+        f[f'rogers_satchell_{w}d'] = np.sqrt(rs.rolling(w).mean().clip(lower=0))
+    atr = _true_range(d)
+    for w in [14, 30]:
+        f[f'atr_ratio_{w}d'] = atr.rolling(w).mean() / (c + EPS)
+    # vol-of-vol: how unstable the vol state itself is
+    for w in [30, 60]:
+        f[f'vol_of_vol_{w}d'] = f['vol_14d'].rolling(w).std() / (f['vol_14d'].rolling(w).mean() + EPS)
+    # where today's vol sits inside its own trailing distribution
+    for w in [30, 90]:
+        f[f'vol_z_{w}d'] = _z(f['vol_14d'], w)
 
     # ---- C. range & candle structure (15) ----
     hl = (h - l) / (c + EPS)
@@ -126,6 +168,22 @@ def compute_factors(df):
     gap = (o - c.shift(1)) / (c.shift(1) + EPS)
     for w in [5, 14]:
         f[f'gap_{w}d'] = gap.rolling(w).mean()
+    # drawdown from the running peak / run-up from the running trough
+    for w in [30, 90]:
+        f[f'drawdown_{w}d'] = c / (c.rolling(w).max() + EPS) - 1
+        f[f'runup_{w}d'] = c / (c.rolling(w).min() + EPS) - 1
+    # freshness of the extreme: 0 = the high/low was today, 1 = w bars ago
+    for w in [30, 90]:
+        f[f'days_since_high_{w}d'] = h.rolling(w).apply(
+            lambda x: (len(x) - 1 - x.argmax()) / (len(x) - 1), raw=True)
+        f[f'days_since_low_{w}d'] = l.rolling(w).apply(
+            lambda x: (len(x) - 1 - x.argmin()) / (len(x) - 1), raw=True)
+    for w in [14, 30]:
+        f[f'range_z_{w}d'] = _z(hl, w)
+    # mean intraday (open->close) move, the perp's session drift
+    intraday = (c - o) / (o + EPS)
+    for w in [5, 14]:
+        f[f'intraday_ret_{w}d'] = intraday.rolling(w).mean()
 
     # ---- D. trend / moving average (22) ----
     for w in [5, 10, 20, 50, 100, 200]:
@@ -146,6 +204,32 @@ def compute_factors(df):
     f['aroon_up_25'] = aroon_up
     f['aroon_down_25'] = aroon_dn
     f['aroon_osc_25'] = aroon_up - aroon_dn
+    # normalised OLS slope of the price path itself
+    for w in [10, 20, 50, 100]:
+        f[f'price_slope_{w}d'] = _slope(c, w)
+    # how linear the path is: R^2 of price against time
+    t_idx = pd.Series(np.arange(len(c), dtype=float), index=c.index)
+    for w in [20, 50]:
+        f[f'trend_r2_{w}d'] = c.rolling(w).corr(t_idx) ** 2
+    # Kaufman efficiency ratio: net move / path length, 1 = pure trend
+    for w in [10, 30]:
+        f[f'eff_ratio_{w}d'] = (c - c.shift(w)).abs() / \
+            (c.diff().abs().rolling(w).sum() + EPS)
+    mom = c.diff()
+    tsi_num = mom.ewm(span=25, adjust=False).mean().ewm(span=13, adjust=False).mean()
+    tsi_den = mom.abs().ewm(span=25, adjust=False).mean().ewm(span=13, adjust=False).mean()
+    f['tsi'] = 100 * tsi_num / (tsi_den + EPS)
+    f['ppo'] = (ema12 - ema26) / (ema26 + EPS) * 100
+    f['dpo_20'] = (c.shift(11) - c.rolling(20).mean()) / (c + EPS)
+    # vortex: directional range movement scaled by true range
+    tr14 = _true_range(d).rolling(14).sum()
+    f['vortex_pos_14'] = (h - l.shift(1)).abs().rolling(14).sum() / (tr14 + EPS)
+    f['vortex_neg_14'] = (l - h.shift(1)).abs().rolling(14).sum() / (tr14 + EPS)
+    f['vortex_diff_14'] = f['vortex_pos_14'] - f['vortex_neg_14']
+    for w in [14, 28]:
+        gains = logret.clip(lower=0).rolling(w).sum()
+        losses = (-logret.clip(upper=0)).rolling(w).sum()
+        f[f'cmo_{w}d'] = 100 * (gains - losses) / (gains + losses + EPS)
 
     # ---- E. oscillators / mean reversion (16) ----
     for w in [7, 14, 21, 30]:
@@ -163,6 +247,25 @@ def compute_factors(df):
         mu, sd = c.rolling(w).mean(), c.rolling(w).std()
         f[f'bb_pct_{w}d'] = (c - (mu - 2 * sd)) / (4 * sd + EPS)
         f[f'bb_width_{w}d'] = 4 * sd / (mu + EPS)
+    # stochastic of the RSI itself: where RSI sits in its own recent range
+    rsi14 = f['rsi_14d']
+    rsi_min, rsi_max = rsi14.rolling(14).min(), rsi14.rolling(14).max()
+    f['stoch_rsi_14'] = (rsi14 - rsi_min) / (rsi_max - rsi_min + EPS)
+    # ultimate oscillator: buying pressure over three blended horizons
+    prev_c = c.shift(1)
+    bp = c - np.minimum(l, prev_c)
+    tr = np.maximum(h, prev_c) - np.minimum(l, prev_c)
+    avgs = [bp.rolling(w).sum() / (tr.rolling(w).sum() + EPS) for w in (7, 14, 28)]
+    f['ultimate_osc'] = 100 * (4 * avgs[0] + 2 * avgs[1] + avgs[2]) / 7
+    f['williams_r_28'] = -100 * (h.rolling(28).max() - c) / \
+        (h.rolling(28).max() - l.rolling(28).min() + EPS)
+    f['cci_50'] = (tp - tp.rolling(50).mean()) / (0.015 * tp.rolling(50).std() + EPS)
+    # position inside the Keltner channel (EMA20 +/- 2 ATR)
+    ema20 = c.ewm(span=20, adjust=False).mean()
+    atr20 = _true_range(d).rolling(20).mean()
+    f['keltner_pct_20'] = (c - (ema20 - 2 * atr20)) / (4 * atr20 + EPS)
+    f['bb_pct_100d'] = (lambda mu, sd: (c - (mu - 2 * sd)) / (4 * sd + EPS))(
+        c.rolling(100).mean(), c.rolling(100).std())
 
     # ---- F. volume & liquidity (19) ----
     qv = d['QuoteVolume']
@@ -190,6 +293,36 @@ def compute_factors(df):
     avg_trade = qv / (d['Trades'] + EPS)
     for w in [7, 30]:
         f[f'avg_trade_size_z_{w}d'] = _z(avg_trade, w)
+    # Chaikin money flow: close-location-weighted volume balance
+    mfv = ((c - l) - (h - c)) / (h - l + EPS) * v
+    for w in [14, 30]:
+        f[f'cmf_{w}d'] = mfv.rolling(w).sum() / (v.rolling(w).sum() + EPS)
+    # accumulation/distribution line slope (same units as obv_slope)
+    ad_line = mfv.cumsum()
+    for w in [14, 30]:
+        f[f'ad_slope_{w}d'] = _slope(ad_line, w)
+    force = c.diff() * v
+    for w in [14, 30]:
+        f[f'force_z_{w}d'] = _z(force, w)
+    # ease of movement: range travelled per unit volume, z-scored for scale
+    eom = ((h + l) / 2 - (h.shift(1) + l.shift(1)) / 2) * (h - l) / (v + EPS)
+    f['eom_z_14'] = _z(eom, 14)
+    # price-volume coupling: does volume expansion accompany the move?
+    dlogv = np.log1p(v).diff()
+    for w in [14, 30, 60]:
+        f[f'pv_corr_{w}d'] = logret.rolling(w).corr(dlogv)
+    for w in [14, 30]:
+        f[f'vol_slope_{w}d'] = _slope(v, w)
+    # share of volume printed on up days
+    upvol = v.where(logret > 0, 0.0)
+    for w in [14, 30]:
+        f[f'upvol_frac_{w}d'] = upvol.rolling(w).sum() / (v.rolling(w).sum() + EPS)
+    # Roll (1984) implied spread from negative return autocovariance
+    for w in [14, 30]:
+        autocov = logret.rolling(w).cov(logret.shift(1))
+        f[f'roll_spread_{w}d'] = 2 * np.sqrt((-autocov).clip(lower=0))
+    f['amihud_z_30'] = _z(f['amihud_30d'], 30)
+    f['turnover_z_30'] = _z(qv, 30)
 
     # ---- G. taker flow / microstructure (8) ----
     # Binance klines carry taker-BUY volume; sell volume is the remainder.
@@ -200,6 +333,17 @@ def compute_factors(df):
     taker_q_imb = (2 * d['TakerBuyQuote'] - qv) / (qv + EPS)
     for w in [7, 30]:
         f[f'taker_quote_imb_{w}d'] = taker_q_imb.rolling(w).mean()
+    f['taker_imb_z_30'] = _z(taker_imb, 30)
+    f['taker_quote_imb_z_14'] = _z(taker_q_imb, 14)
+    # is the buying pressure building or fading?
+    for w in [7, 14]:
+        f[f'taker_imb_chg_{w}d'] = taker_imb.rolling(w).mean() - \
+            taker_imb.rolling(w).mean().shift(w)
+    f['taker_imb_slope_14'] = _slope(taker_imb.rolling(3).mean(), 14)
+    f['taker_imb_cum_30d'] = taker_imb.rolling(30).sum()
+    # does aggressive buying actually move price here?
+    for w in [14, 30]:
+        f[f'taker_ret_corr_{w}d'] = taker_imb.rolling(w).corr(logret)
 
     # ---- H. derivatives: funding & basis (20) ----
     fund = d['funding_daily']
@@ -214,17 +358,39 @@ def compute_factors(df):
         f[f'funding_pos_frac_{w}d'] = (fund > 0).rolling(w).mean()
     f['funding_vol_30d'] = fund.rolling(30).std()
     f['funding_chg_7d'] = fund.rolling(7).mean() - fund.rolling(7).mean().shift(7)
+    # where today's funding sits in its own trailing distribution
+    for w in [90, 180]:
+        f[f'funding_pctile_{w}d'] = fund.rolling(w).rank(pct=True)
+    f['funding_min_30d'] = fund.rolling(30).min()
+    f['funding_max_30d'] = fund.rolling(30).max()
+    f['funding_skew_60d'] = fund.rolling(60).skew()
+    f['funding_slope_14d'] = _slope(fund, 14)
+    f['funding_dev_30d'] = fund - fund.rolling(30).mean()
+    f['funding_pos_frac_60d'] = (fund > 0).rolling(60).mean()
 
-    spot_close = d['SpotClose'] if 'SpotClose' in d else pd.Series(np.nan, index=d.index)
+    # to_numeric: symbols without a spot pair carry pd.NA, which turns the
+    # column into object dtype and breaks both rolling ops and LightGBM.
+    spot_close = pd.to_numeric(d['SpotClose'], errors='coerce') if 'SpotClose' in d \
+        else pd.Series(np.nan, index=d.index)
     basis = (c - spot_close) / (spot_close + EPS)
     f['basis_1d'] = basis
     for w in [3, 7, 14, 30]:
         f[f'basis_mean_{w}d'] = basis.rolling(w).mean()
     f['basis_z_14d'] = _z(basis, 14)
-    spot_vol = d['SpotVolume'] if 'SpotVolume' in d else pd.Series(np.nan, index=d.index)
+    f['basis_vol_30d'] = basis.rolling(30).std()
+    f['basis_chg_7d'] = basis.rolling(7).mean() - basis.rolling(7).mean().shift(7)
+    f['basis_pctile_90d'] = basis.rolling(90).rank(pct=True)
+    spot_vol = pd.to_numeric(d['SpotVolume'], errors='coerce') if 'SpotVolume' in d \
+        else pd.Series(np.nan, index=d.index)
     perp_spot = v / (spot_vol + EPS)
     for w in [7, 30]:
         f[f'perp_spot_vol_{w}d'] = np.log1p(perp_spot.rolling(w).mean())
+    f['perp_spot_vol_z_14'] = _z(np.log1p(perp_spot), 14)
+
+    # ---- I. calendar ----
+    dow = pd.Series(d.index.dayofweek, index=d.index).astype(float)
+    f['dow_sin'] = np.sin(2 * np.pi * dow / 7)
+    f['dow_cos'] = np.cos(2 * np.pi * dow / 7)
 
     out = pd.concat({k: pd.Series(v, index=d.index) if not isinstance(v, pd.Series) else v
                      for k, v in f.items()}, axis=1)
@@ -238,6 +404,41 @@ def compute_factors(df):
 FACTOR_PREFIX_SKIP = {'Open', 'High', 'Low', 'Close', 'Volume', 'QuoteVolume',
                       'funding_daily', 'Symbol'}
 
+# The 2026-09-21 factor expansion, grouped by family. Family-level ablation on
+# the selection head (wf_step=40, vs the previous 158-feature baseline RankIC
+# +0.031) showed C/E/G/H/cross-sectional/calendar additions HELP ranking while
+# A/B/D/F additions hurt it; models.HEADS excludes the hurtful ones for the
+# selection head only. All heads keep the full panel available.
+V2_MOMENTUM = ([f'mom_accel_{w}d' for w in (7, 14, 30)] +
+               [f'sharpe_mom_{w}d' for w in (7, 14, 30, 60, 90)] +
+               [f'updays_frac_{w}d' for w in (5, 10, 21, 60)] +
+               [f'ret_skew_{w}d' for w in (14, 30, 60)] +
+               [f'ret_kurt_{w}d' for w in (14, 30, 60)] +
+               [f'max_ret_{w}d' for w in (14, 30)] +
+               [f'min_ret_{w}d' for w in (14, 30)] + ['ret_streak'])
+V2_VOLATILITY = ([f'upside_vol_{w}d' for w in (14, 30)] +
+                 [f'up_down_vol_ratio_{w}d' for w in (14, 30)] +
+                 [f'rogers_satchell_{w}d' for w in (14, 30)] +
+                 [f'atr_ratio_{w}d' for w in (14, 30)] +
+                 [f'vol_of_vol_{w}d' for w in (30, 60)] +
+                 [f'vol_z_{w}d' for w in (30, 90)])
+V2_TREND = ([f'price_slope_{w}d' for w in (10, 20, 50, 100)] +
+            [f'trend_r2_{w}d' for w in (20, 50)] +
+            [f'eff_ratio_{w}d' for w in (10, 30)] +
+            ['tsi', 'ppo', 'dpo_20', 'vortex_pos_14', 'vortex_neg_14',
+             'vortex_diff_14', 'cmo_14d', 'cmo_28d'])
+V2_VOLUME = ([f'cmf_{w}d' for w in (14, 30)] +
+             [f'ad_slope_{w}d' for w in (14, 30)] +
+             [f'force_z_{w}d' for w in (14, 30)] + ['eom_z_14'] +
+             [f'pv_corr_{w}d' for w in (14, 30, 60)] +
+             [f'vol_slope_{w}d' for w in (14, 30)] +
+             [f'upvol_frac_{w}d' for w in (14, 30)] +
+             [f'roll_spread_{w}d' for w in (14, 30)] +
+             ['amihud_z_30', 'turnover_z_30'])
+
+# What the selection head does NOT see (69 features).
+SELECTION_EXCLUDE = V2_MOMENTUM + V2_VOLATILITY + V2_TREND + V2_VOLUME
+
 
 def factor_columns(df):
     return [c for c in df.columns if c not in FACTOR_PREFIX_SKIP]
@@ -249,8 +450,15 @@ CS_RANK_BASE = [
     'ret_7d', 'ret_30d', 'vol_14d', 'funding_mean_7d', 'taker_imb_7d',
     'log_dollar_vol_30d', 'rsi_14d', 'basis_mean_7d', 'sma_ratio_50d',
     'close_loc_14d',
+    # second wave: momentum spectrum, risk-adjusted momentum, flow and liquidity
+    'ret_1d', 'ret_14d', 'ret_60d', 'ret_90d', 'sharpe_mom_30d', 'mom_accel_14d',
+    'vol_30d', 'parkinson_14d', 'taker_imb_14d', 'funding_z_14d',
+    'funding_cum_30d', 'basis_z_14d', 'obv_slope_14d', 'amihud_14d', 'mfi_14',
+    'macd_hist', 'bb_pct_20d', 'zscore_20d', 'drawdown_30d', 'eff_ratio_30d',
 ]
-CS_Z_BASE = ['ret_7d', 'vol_14d', 'funding_mean_7d']
+CS_Z_BASE = ['ret_7d', 'vol_14d', 'funding_mean_7d',
+             'ret_30d', 'taker_imb_7d', 'basis_mean_7d', 'log_dollar_vol_30d',
+             'sharpe_mom_30d']
 
 
 def add_cross_sectional(panel, benchmark='BTCUSDT'):
@@ -273,18 +481,29 @@ def add_cross_sectional(panel, benchmark='BTCUSDT'):
             p[f'cs_z_{col}'] = (p[col] - mu) / (sd + EPS)
 
     # --- market aggregates (same value for every asset on a date) ---
-    ret1 = p['ret_1d']
     p['mkt_ret_1d'] = g['ret_1d'].transform('mean')
     p['mkt_ret_7d'] = g['ret_7d'].transform('mean')
     p['mkt_vol_14d'] = g['vol_14d'].transform('mean')
     p['mkt_funding_7d'] = g['funding_mean_7d'].transform('mean')
     p['mkt_breadth_7d'] = g['ret_7d'].transform(lambda s: (s > 0).mean())
     p['mkt_dispersion_1d'] = g['ret_1d'].transform('std')
+    p['mkt_ret_30d'] = g['ret_30d'].transform('mean')
+    p['mkt_vol_30d'] = g['vol_30d'].transform('mean')
+    p['mkt_breadth_30d'] = g['ret_30d'].transform(lambda s: (s > 0).mean())
+    p['mkt_breadth_1d'] = g['ret_1d'].transform(lambda s: (s > 0).mean())
+    p['mkt_dispersion_7d'] = g['ret_7d'].transform('std')
+    p['mkt_taker_imb_7d'] = g['taker_imb_7d'].transform('mean')
+    p['mkt_basis_7d'] = g['basis_mean_7d'].transform('mean')
+    p['mkt_funding_z_14d'] = g['funding_z_14d'].transform('mean')
+
+    # --- excess over the market (cross-sectionally demeaned momentum) ---
+    for w in [1, 7, 30]:
+        p[f'exc_ret_{w}d'] = p[f'ret_{w}d'] - p[f'mkt_ret_{w}d']
 
     # --- relative to the benchmark ---
     bench = p.xs(benchmark, level='Symbol') if benchmark in p.index.get_level_values('Symbol') else None
     if bench is not None:
-        for w in [7, 30]:
+        for w in [7, 14, 30, 90]:
             b = bench[f'ret_{w}d'].reindex(p.index.get_level_values('Date')).values
             p[f'rel_ret_{w}d_vs_bench'] = p[f'ret_{w}d'].values - b
 
