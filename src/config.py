@@ -1,0 +1,90 @@
+"""
+Central configuration. Every path derives from the project root, so the pipeline
+runs from any working directory.
+
+Architecture -- four LightGBM heads on one daily panel of Binance USDT perps:
+
+  selection   regression  forward 7d return   -> cross-sectional ranking (选币)
+  timing      binary      P(tomorrow up)      -> reported probability   (择时)
+  range_high  quantile    q90 of next high    -> upper price boundary
+  range_low   quantile    q10 of next low     -> lower price boundary
+
+All four are sampled DAILY, so the 7d label overlaps across consecutive rows;
+every validation split carries an `embargo` equal to the label horizon.
+"""
+from pathlib import Path
+
+# --- Paths -----------------------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = PROJECT_ROOT / 'src'
+DATA_DIR = PROJECT_ROOT / 'data'
+BINANCE_DIR = DATA_DIR / 'binance'
+SHORT_HISTORY_PATH = DATA_DIR / 'short_history.parquet'
+MODELS_DIR = PROJECT_ROOT / 'models'
+OUTPUT_DIR = PROJECT_ROOT / 'output'
+PLANS_DIR = OUTPUT_DIR / 'plans'
+NOTEBOOKS_DIR = PROJECT_ROOT / 'notebooks'
+
+
+def model_path(head):
+    """Bundle path for a head: selection | timing | range_high | range_low."""
+    return MODELS_DIR / f'lgb_{head}.joblib'
+
+
+def plot_path(name):
+    return MODELS_DIR / f'{name}.png'
+
+
+def plan_path(as_of):
+    return PLANS_DIR / f'plan_{as_of:%Y-%m-%d}.csv'
+
+
+# --- Universe --------------------------------------------------------------
+EXCHANGE = 'binance_perp'
+UNIVERSE_SIZE = 50          # top N USDT perps by 24h quote volume
+MIN_HISTORY_DAYS = 400      # a symbol needs at least this much history to join
+START_DATE = '2023-09-21'
+END_DATE = None             # None -> today
+BENCHMARK_SYMBOL = 'BTCUSDT'
+WARMUP_DAYS = 90            # head rows dropped per symbol (rolling warm-up)
+
+# --- Factors ---------------------------------------------------------------
+# 158 features: 132 single-asset (price / volume / microstructure / funding /
+# basis) + 26 cross-sectional & market. See src/factors.py for the families.
+FACTOR_PARAMS = {}          # factors.py owns its windows; kept for API symmetry
+
+# --- Model -----------------------------------------------------------------
+# LightGBM: strongest general-purpose learner for a tabular panel this size, and
+# it treats NaN as "not yet observable" instead of forcing an imputation.
+LGB_PARAMS = dict(
+    n_estimators=300,
+    learning_rate=0.03,
+    num_leaves=31,
+    max_depth=6,
+    min_child_samples=50,      # main overfit brake with 158 features
+    subsample=0.8, subsample_freq=1,
+    colsample_bytree=0.6,      # decorrelates trees across correlated factors
+    reg_alpha=0.1, reg_lambda=1.0,
+    random_state=42, n_jobs=-1, verbosity=-1,
+)
+TRAIN_WINDOW = 252          # rolling walk-forward window, in daily bars
+WF_STEP = 10                # refit cadence for VALIDATION (production refits nightly)
+CONFORMAL_CALIB_DAYS = 250  # trailing window used to calibrate the range heads
+
+# Columns that are never model inputs.
+NON_FEATURE_COLS = [
+    'Date', 'Symbol', 'Open', 'High', 'Low', 'Close', 'Volume', 'QuoteVolume',
+    'funding_daily', 'target_ret_7d', 'target_ret_1d', 'target_up_1d',
+    'target_high_1d', 'target_low_1d', 'funding_next_1d', 'target_net_1d',
+]
+
+# --- Strategy --------------------------------------------------------------
+TOP_N = 8                  # positions held from the selection ranking
+EXIT_RANK_MULT = 2         # hysteresis: sell only when a name leaves top N*mult
+USE_TIMING_GATE = False    # gating on P(up) is net-negative -- see README
+PROB_THRESHOLD = 0.50      # only applies when USE_TIMING_GATE is True
+COST_BPS = 10.0            # one-way taker fee, basis points of notional
+ANNUALIZATION = 365        # perps trade every calendar day
+
+# --- Execution -------------------------------------------------------------
+CAPITAL = 10_000.0         # notional used to size the nightly plan
