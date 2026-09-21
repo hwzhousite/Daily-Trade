@@ -85,6 +85,50 @@ def rule_equal_weight(grp, prev_weights, **_):
     return _equal(grp['Symbol'].tolist())
 
 
+def rule_long_short(grp, prev_weights, top_n, exit_rank_mult=None, gross=1.0, **_):
+    """
+    Long the top N, short the bottom N of the selection ranking, equal weight
+    per side, dollar-neutral. `gross` is total exposure (1.0 = 50% long + 50%
+    short). With exit_rank_mult set, hysteresis applies symmetrically: a long
+    survives while it stays in the top N*mult, a short while it stays in the
+    bottom N*mult.
+
+    The engine handles signed weights natively: a short's price PnL is
+    -w*ret, and its funding flow flips sign too -- a short RECEIVES positive
+    funding, which matters here because the ranking's favourite longs tend to
+    have negative funding (longs get paid) while bottom names skew positive.
+    """
+    ranked = grp.sort_values('sel_score', ascending=False)['Symbol'].tolist()
+    if len(ranked) < 2 * top_n:
+        top_n = len(ranked) // 2
+    if top_n == 0:
+        return {}
+    per_side = gross / 2.0
+
+    if exit_rank_mult:
+        keep_long = set(ranked[:top_n * exit_rank_mult])
+        keep_short = set(ranked[-top_n * exit_rank_mult:])
+        longs = [s for s, w in (prev_weights or {}).items() if w > 0 and s in keep_long]
+        for s in ranked[:top_n]:
+            if s not in longs and len(longs) < top_n:
+                longs.append(s)
+        longs = longs[:top_n]
+        long_set = set(longs)
+        shorts = [s for s, w in (prev_weights or {}).items()
+                  if w < 0 and s in keep_short and s not in long_set]
+        for s in reversed(ranked[-top_n:]):
+            if s not in shorts and s not in long_set and len(shorts) < top_n:
+                shorts.append(s)
+        shorts = shorts[:top_n]
+    else:
+        longs = ranked[:top_n]
+        shorts = ranked[-top_n:]
+
+    w = {s: per_side / len(longs) for s in longs}
+    w.update({s: -per_side / len(shorts) for s in shorts})
+    return w
+
+
 def rule_buy_and_hold(symbol):
     def _rule(grp, prev_weights, **_):
         return {symbol: 1.0} if symbol in set(grp['Symbol']) else {}
@@ -155,6 +199,11 @@ def run_all(signal_df, top_n=None, prob_threshold=None, cost_bps=None,
         'Selection + Hysteresis': (rule_selection_hysteresis,
                                    dict(top_n=top_n, exit_rank_mult=exit_mult)),
         'Selection (daily rebal)': (rule_selection_only, dict(top_n=top_n)),
+        'L/S 50-50 + Hysteresis': (rule_long_short,
+                                   dict(top_n=top_n, exit_rank_mult=exit_mult, gross=1.0)),
+        'L/S 50-50 (daily)':      (rule_long_short, dict(top_n=top_n, gross=1.0)),
+        'L/S 100-100 + Hyst.':    (rule_long_short,
+                                   dict(top_n=top_n, exit_rank_mult=exit_mult, gross=2.0)),
         'Selection + Timing gate': (rule_selection_timing,
                                     dict(top_n=top_n, prob_threshold=prob_threshold)),
         'Timing only':            (rule_timing_only, dict(top_n=top_n, prob_threshold=prob_threshold)),
@@ -183,6 +232,9 @@ def plot_curves(curves, save_path=None, show=False, title=None):
     styles = {
         'Selection + Hysteresis':  dict(color='darkgreen', lw=2.5),
         'Selection (daily rebal)': dict(color='seagreen', lw=1.5, ls='--'),
+        'L/S 50-50 + Hysteresis':  dict(color='darkorange', lw=2.0),
+        'L/S 50-50 (daily)':       dict(color='goldenrod', lw=1.3, ls='--'),
+        'L/S 100-100 + Hyst.':     dict(color='sienna', lw=1.3, ls=':'),
         'Selection + Timing gate': dict(color='crimson', lw=1.5),
         'Timing only':             dict(color='purple', lw=1.2, ls='-.'),
         'Equal-Weight (all)':      dict(color='royalblue', lw=1.8, ls='--'),
