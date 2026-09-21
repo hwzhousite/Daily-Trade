@@ -47,7 +47,8 @@ EPS = 1e-12
 # config.FEATURE_SELECTOR, when set, overrides every head (for experiments).
 HEADS = {
     'selection':  dict(task='regression', target='target_ret_7d',  horizon=7, embargo=7,
-                       cs=True, selector='off', exclude=_factors.SELECTION_EXCLUDE),
+                       cs=True, selector='off', exclude=_factors.SELECTION_EXCLUDE,
+                       ensemble=True),
     'timing':     dict(task='binary',     target='target_up_1d',   horizon=1, embargo=1,
                        cs=False, selector='ic'),
     'range_high': dict(task='quantile',   target='target_high_1d', horizon=1, embargo=1,
@@ -55,6 +56,47 @@ HEADS = {
     'range_low':  dict(task='quantile',   target='target_low_1d',  horizon=1, embargo=1,
                        alpha=0.10, cs=False, selector='ic'),
 }
+
+
+class EnsembleRegressor:
+    """
+    Bag of independently seeded LGBM regressors.
+
+    Boosting has no random-forest OOB property, so per-prediction uncertainty
+    comes from re-fitting the same spec on K different seeds (which reshuffle
+    the row/feature subsampling): the bag's disagreement (std across members)
+    is an out-of-sample-style confidence estimate for each prediction.
+    """
+
+    def __init__(self, models):
+        self.models = models
+
+    def _stack(self, X):
+        return np.stack([m.predict(X) for m in self.models])
+
+    def predict(self, X):
+        return self._stack(X).mean(axis=0)
+
+    def predict_stats(self, X):
+        preds = self._stack(X)
+        return preds.mean(axis=0), preds.std(axis=0)
+
+
+def _fit_head_model(head, params, X, y):
+    """One fitted estimator: an EnsembleRegressor for an ensemble head."""
+    n = config.N_ENSEMBLE if head.get('ensemble') else 1
+    if head['task'] != 'regression' or n <= 1:
+        model = _make_model(head, params)
+        model.fit(X, y)
+        return model
+    members = []
+    for k in range(n):
+        p = dict(params or config.LGB_PARAMS)
+        p['random_state'] = int(p.get('random_state', 42)) + k
+        m = _make_model(head, p)
+        m.fit(X, y)
+        members.append(m)
+    return EnsembleRegressor(members)
 
 
 def _make_model(head, params=None):
@@ -318,9 +360,15 @@ def walk_forward(panel, head_name, features=None, wf_step=None, train_window=Non
                                                cross_sectional=head.get('cs', False))
         n_feats_used.append(len(fold_feats))
 
-        model = _make_model(head, params)
-        model.fit(tr[fold_feats], tr[target])
-        te['prediction'] = _predict(model, te[fold_feats], head['task'])
+        model = _fit_head_model(head, params, tr[fold_feats], tr[target])
+        if isinstance(model, EnsembleRegressor):
+            mean, std = model.predict_stats(te[fold_feats])
+            te['prediction'] = mean
+            te['prediction_std'] = std
+            te['prediction_tstat'] = mean / (std + EPS)
+            te['prediction_lcb'] = mean - std
+        else:
+            te['prediction'] = _predict(model, te[fold_feats], head['task'])
         folds.append(te)
 
     if not folds:
@@ -367,13 +415,13 @@ def fit_production(panel, head_name, features=None, params=None, save=True,
         features = select_features_lasso(df, features, target,
                                          cross_sectional=head.get('cs', False))
 
-    model = _make_model(head, params)
-    model.fit(df[features], df[target])
+    model = _fit_head_model(head, params, df[features], df[target])
 
+    booster_owner = model.models[0] if isinstance(model, EnsembleRegressor) else model
     importances = pd.DataFrame({
         'Feature': features,
-        'Gain': model.booster_.feature_importance('gain'),
-        'Split': model.booster_.feature_importance('split'),
+        'Gain': booster_owner.booster_.feature_importance('gain'),
+        'Split': booster_owner.booster_.feature_importance('split'),
     }).sort_values('Gain', ascending=False).reset_index(drop=True)
 
     bundle = {

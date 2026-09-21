@@ -130,9 +130,21 @@ NON_FEATURE_COLS = [
     'target_high_1d', 'target_low_1d', 'funding_next_1d', 'target_net_1d',
 ]
 
+# --- Selection ensemble & confidence ---------------------------------------
+# LightGBM is boosting, so it has no random-forest OOB property; the
+# equivalent is a BAG of independently seeded fits, whose disagreement is an
+# out-of-sample uncertainty estimate per prediction.
+N_ENSEMBLE = 5             # bagged fits for the selection head (1 = single model)
+# 'tstat': rank by mean/std across the bag (confidence-weighted score)
+# 'lcb':   rank by mean - std (lower confidence bound)
+# 'off':   rank by the plain ensemble mean
+CONF_RANKING = 'tstat'
+
 # --- Strategy --------------------------------------------------------------
 TOP_N = 8                  # positions held from the selection ranking
 EXIT_RANK_MULT = 2         # hysteresis: sell only when a name leaves top N*mult
+MAX_ENTRIES_PER_DAY = 3    # new BUYs per day; unfilled slots stay in cash
+                           # (exits are never throttled -- risk control first)
 USE_TIMING_GATE = False    # gating on P(up) is net-negative -- see README
 PROB_THRESHOLD = 0.50      # only applies when USE_TIMING_GATE is True
 COST_BPS = 10.0            # one-way taker fee, basis points of notional

@@ -58,7 +58,19 @@ def generate_signals(panel, top_n=None, prob_threshold=None, prev_holdings=None,
         return snap[bundles[name]['features']]
 
     out = snap[['Symbol', 'Close']].copy()
-    out['sel_score_7d'] = bundles['selection']['model'].predict(_X('selection'))
+    sel_model = bundles['selection']['model']
+    if hasattr(sel_model, 'predict_stats'):
+        # Ensemble head: mean = expected 7d return; std = the bag's
+        # disagreement, an out-of-sample-style uncertainty per coin.
+        mean, std = sel_model.predict_stats(_X('selection'))
+        out['sel_score_7d'] = mean
+        out['sel_std_7d'] = std
+        conf = {'tstat': mean / (std + 1e-12), 'lcb': mean - std}
+        out['rank_score'] = conf.get(config.CONF_RANKING, mean)
+    else:
+        out['sel_score_7d'] = sel_model.predict(_X('selection'))
+        out['sel_std_7d'] = np.nan
+        out['rank_score'] = out['sel_score_7d']
     out['prob_up_1d'] = bundles['timing']['model'].predict_proba(_X('timing'))[:, 1]
 
     # Quantile heads + their conformal offsets.
@@ -71,17 +83,20 @@ def generate_signals(panel, top_n=None, prob_threshold=None, prev_holdings=None,
 
     out['expected_move'] = out['high_ret'] - out['low_ret']
 
-    out = out.sort_values('sel_score_7d', ascending=False).reset_index(drop=True)
+    out = out.sort_values('rank_score', ascending=False).reset_index(drop=True)
     out['Rank'] = np.arange(1, len(out) + 1)
     out['In_Entry_Zone'] = out['Rank'] <= top_n
     out['In_Keep_Zone'] = out['Rank'] <= top_n * exit_rank_mult
     out['Was_Held'] = out['Symbol'].isin(prev_holdings)
 
-    # --- hysteresis: keep what is still inside the band, then top up ---
+    # --- hysteresis: keep what is still inside the band, then top up, at
+    # most MAX_ENTRIES_PER_DAY new names per night (exits never throttled) ---
     held = [s for s in out.loc[out['Was_Held'] & out['In_Keep_Zone'], 'Symbol']]
+    adds = 0
     for sym in out.loc[out['In_Entry_Zone'], 'Symbol']:
-        if sym not in held and len(held) < top_n:
+        if sym not in held and len(held) < top_n and adds < config.MAX_ENTRIES_PER_DAY:
             held.append(sym)
+            adds += 1
     held = held[:top_n]
 
     out['Timing_OK'] = out['prob_up_1d'] > prob_threshold
@@ -115,6 +130,8 @@ def generate_signals(panel, top_n=None, prob_threshold=None, prev_holdings=None,
                       if b.get('task') == 'quantile'},
         'wf_metrics': {n: b.get('wf_metrics') for n, b in bundles.items()},
         'n_features': {n: len(b['features']) for n, b in bundles.items()},
+        'conf_ranking': config.CONF_RANKING,
+        'max_entries_per_day': config.MAX_ENTRIES_PER_DAY,
     }
     return out, held, meta
 
@@ -128,6 +145,7 @@ def format_signals(signals, n=None):
         'Close': df['Close'].map(lambda v: f"{v:,.6g}"),
         'P(up)': df['prob_up_1d'].map(lambda v: f"{v:.1%}"),
         'Exp7d': df['sel_score_7d'].map(lambda v: f"{v:+.2%}"),
+        'Std7d': df['sel_std_7d'].map(lambda v: f"{v:.2%}" if pd.notna(v) else '-'),
         'Low': df['low_price'].map(lambda v: f"{v:,.6g}"),
         'High': df['high_price'].map(lambda v: f"{v:,.6g}"),
         'Band': df['expected_move'].map(lambda v: f"{v:.1%}"),

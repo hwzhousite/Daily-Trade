@@ -21,8 +21,12 @@ import config
 
 def build_signal_frame(results):
     """Merges every head's walk-forward predictions onto one daily grid."""
-    sel = results['selection']['wf_predictions'][
-        ['Date', 'Symbol', 'prediction']].rename(columns={'prediction': 'sel_score'})
+    sel_preds = results['selection']['wf_predictions']
+    # Rank by the ensemble's confidence-adjusted score when available:
+    # t-stat ranking beat the raw mean +0.031 -> +0.038 RankIC at wf40.
+    conf_col = {'tstat': 'prediction_tstat', 'lcb': 'prediction_lcb'}.get(config.CONF_RANKING)
+    score_col = conf_col if conf_col and conf_col in sel_preds.columns else 'prediction'
+    sel = sel_preds[['Date', 'Symbol', score_col]].rename(columns={score_col: 'sel_score'})
     tim = results['timing']['wf_predictions'][
         ['Date', 'Symbol', 'prediction', 'target_ret_1d', 'funding_next_1d',
          'target_net_1d', 'Close']].rename(columns={'prediction': 'prob_up'})
@@ -46,7 +50,8 @@ def _equal(held):
     return {s: 1.0 / len(held) for s in held} if held else {}
 
 
-def rule_selection_hysteresis(grp, prev_weights, top_n, exit_rank_mult=2, **_):
+def rule_selection_hysteresis(grp, prev_weights, top_n, exit_rank_mult=2,
+                              max_entries=None, **_):
     """
     DEFAULT rule. Enter the top N; hold until the name drops out of the top
     N*exit_rank_mult.
@@ -55,16 +60,23 @@ def rule_selection_hysteresis(grp, prev_weights, top_n, exit_rank_mult=2, **_):
     ranking is not that precise -- a name sitting at rank 9 today and 7
     tomorrow carries no real signal, but round-tripping it costs real fees.
     The band cuts turnover ~60% with no systematic loss of return.
+
+    At most `max_entries` NEW names enter per day (exits are never throttled);
+    each held name is weighted 1/top_n, so an under-filled book holds the
+    remainder in cash instead of concentrating.
     """
+    max_entries = config.MAX_ENTRIES_PER_DAY if max_entries is None else max_entries
     ranked = grp.sort_values('sel_score', ascending=False)['Symbol'].tolist()
     entries = ranked[:top_n]
     keep_zone = set(ranked[:top_n * exit_rank_mult])
 
     held = [s for s in (prev_weights or {}) if s in keep_zone]
+    adds = 0
     for s in entries:
-        if s not in held and len(held) < top_n:
+        if s not in held and len(held) < top_n and adds < max_entries:
             held.append(s)
-    return _equal(held[:top_n])
+            adds += 1
+    return {s: 1.0 / top_n for s in held[:top_n]}
 
 
 def rule_selection_timing(grp, prev_weights, top_n, prob_threshold, **_):
