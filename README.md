@@ -1,6 +1,6 @@
 # CryptoQuantPipeline
 
-Binance USDT 永续合约的横截面选币策略。305 个因子、LightGBM 四头模型，每晚出次日预测和交易计划。
+Binance USDT 永续合约的横截面选币策略。321 个因子、LightGBM 四头模型，每晚出次日预测和交易计划。
 
 > **管线状态（2026-09-21 定稿）**：305 因子 + 按头特征策略（selection 策展池 236 特征直入、
 > timing/range 走 IC 筛选）+ 按头调优超参。wf_step=10 正式验证：selection RankIC **+0.0212
@@ -46,8 +46,8 @@ Binance USDT 永续合约的横截面选币策略。305 个因子、LightGBM 四
    data/binance/{SYMBOL}.parquet        44 个币 × ~1095 天
             ▼
    factors.compute_factors()            241 个单币因子
-   factors.add_cross_sectional()      + 64 个横截面/市场因子
-            ▼                          ═══ 305 个特征 ═══
+   factors.add_cross_sectional()      + 80 个横截面/市场/领导币因子
+            ▼                          ═══ 321 个特征 ═══
    factors.add_labels()                 7 个标签（含扣资金费的净收益）
             ▼
    ┌──────────────┬──────────────┬──────────────┬──────────────┐
@@ -146,7 +146,7 @@ P(up) 分档      样本数    次日平均收益
 
 ## 因子库
 
-305 个特征。完整定义见 [`src/factors.py`](src/factors.py)。
+321 个特征。完整定义见 [`src/factors.py`](src/factors.py)。
 
 ### 单币因子（241，含 2 个日历因子）
 
@@ -162,12 +162,18 @@ P(up) 分档      样本数    次日平均收益
 | H **衍生品** | 34 | 资金费率均值/Z/累计/为正比例/波动/变化率；基差 5 口径；永续/现货量比；**新增**：资金费 90/180 日分位(2)、30 日极值(2)、偏度、斜率、偏离、60 日为正比例；基差波动/变化/90 日分位(3)；量比 Z |
 | 日历 | 2 | 星期几的 sin/cos 编码（永续 7×24，周末效应真实存在） |
 
-### 横截面与市场因子（64）
+### 横截面与市场因子（80）
 
 `cs_rank_*`（**30** 个关键因子的每日百分位排名，覆盖动量谱、风险调整动量、流动性、资金费、基差、回撤）、
 `cs_z_*`（8 个）、`mkt_*`（市场收益/波动/资金费/宽度/离散度/主动买卖/基差，**14** 个）、
 `exc_ret_*`（超额于市场均值，3 个）、`rel_ret_*_vs_bench`（相对 BTC，**4** 个）、
 `beta_bench_*` / `corr_bench_*`（4 个）、`idio_vol_30d`。
+
+**领导币特征（16，2026-09-22 新增）**：BTC 和 ETH 主导市场——每币与 ETH 的
+30 日滚动相关 `corr_eth_30d`（与 BTC 的即 `corr_bench_30d`）、阵营谱
+`lead_corr_spread_30d`（corr_BTC − corr_ETH）、相对 ETH 强度
+`rel_ret_{7,30}d_vs_eth`，以及两个领导币自身状态按日广播：
+`{btc,eth}_{ret_7d, ret_30d, vol_14d, rsi_14d, funding_mean_7d, sma_ratio_50d}`。
 
 横截面因子是排序模型真正需要的——一个孤立的动量值说不出这个币今天是不是最强的。
 

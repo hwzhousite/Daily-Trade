@@ -1,5 +1,5 @@
 """
-Factor library: 305 price/volume/microstructure/derivatives factors.
+Factor library: 321 price/volume/microstructure/derivatives factors.
 
 Every factor is computed from data observable AT or BEFORE the bar it is
 attached to. There is no bfill anywhere; the rolling warm-up period is dropped.
@@ -14,7 +14,8 @@ Families (single-asset: 241)
     G  taker flow (microstructure) 16
     H  derivatives (funding/basis) 34
        calendar (day-of-week)       2
-Cross-sectional & market: 64        (computed across assets, see build_panel)
+Cross-sectional & market: 80        (computed across assets, incl. BTC/ETH
+                                     leader state & correlations, see build_panel)
 
 NOTE: walk-forward showed the 305-feature set DILUTES the selection head's
 RankIC versus the previous 158-feature set at default LGB_PARAMS (the new
@@ -460,6 +461,11 @@ CS_Z_BASE = ['ret_7d', 'vol_14d', 'funding_mean_7d',
              'ret_30d', 'taker_imb_7d', 'basis_mean_7d', 'log_dollar_vol_30d',
              'sharpe_mom_30d']
 
+# Market leaders whose own state is injected into every coin's feature row.
+LEADERS = {'btc': 'BTCUSDT', 'eth': 'ETHUSDT'}
+LEADER_STATE_COLS = ['ret_7d', 'ret_30d', 'vol_14d', 'rsi_14d',
+                     'funding_mean_7d', 'sma_ratio_50d']
+
 
 def add_cross_sectional(panel, benchmark='BTCUSDT'):
     """
@@ -529,6 +535,33 @@ def add_cross_sectional(panel, benchmark='BTCUSDT'):
             pd.Series(bench['ret_1d'].rolling(30).std().reindex(
                 p.index.get_level_values('Date')).values, index=p.index) ** 2
         p['idio_vol_30d'] = np.sqrt(resid_var.clip(lower=0))
+
+    # --- market leaders: BTC & ETH state injected into every coin's row ---
+    # BTC and ETH lead this market. Two kinds of features:
+    #   {btc,eth}_<state>    the leader's OWN momentum/vol/RSI/funding/trend,
+    #                        broadcast per date (regime context, like mkt_*)
+    #   corr_eth_30d etc.    each coin's trailing 30d correlation with the
+    #                        leader (corr with BTC already exists as
+    #                        corr_bench_30d), plus relative strength vs ETH
+    #                        and the BTC-vs-ETH allegiance spread.
+    dates_idx = p.index.get_level_values('Date')
+    for tag, sym in LEADERS.items():
+        if sym not in p.index.get_level_values('Symbol'):
+            continue
+        lead = p.xs(sym, level='Symbol')
+        for col in LEADER_STATE_COLS:
+            p[f'{tag}_{col}'] = lead[col].reindex(dates_idx).values
+        if sym == benchmark:
+            continue    # correlation/relative features vs BTC already exist
+        lead_r1 = pd.Series(lead['ret_1d'].reindex(dates_idx).values, index=p.index)
+        tmp = pd.DataFrame({'_r': p['ret_1d'], '_b': lead_r1})
+        p[f'corr_{tag}_30d'] = tmp.groupby(level='Symbol', group_keys=False).apply(
+            lambda s: s['_r'].rolling(30).corr(s['_b']))
+        for w in [7, 30]:
+            p[f'rel_ret_{w}d_vs_{tag}'] = p[f'ret_{w}d'] - p[f'{tag}_ret_{w}d']
+    if 'corr_bench_30d' in p and 'corr_eth_30d' in p:
+        # which camp does the coin follow: +1 = trades with BTC, -1 = with ETH
+        p['lead_corr_spread_30d'] = p['corr_bench_30d'] - p['corr_eth_30d']
 
     return p
 
