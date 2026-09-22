@@ -49,8 +49,9 @@ BENCHMARK_SYMBOL = 'BTCUSDT'
 WARMUP_DAYS = 90            # head rows dropped per symbol (rolling warm-up)
 
 # --- Factors ---------------------------------------------------------------
-# 305 features: 241 single-asset (price / volume / microstructure / funding /
-# basis / calendar) + 64 cross-sectional & market. See src/factors.py.
+# 332 features: 248 single-asset (price / volume / microstructure / funding /
+# basis / calendar / box breakout) + 84 cross-sectional & market (incl.
+# BTC/ETH leader state and leadership/breakout ranks). See src/factors.py.
 FACTOR_PARAMS = {}          # factors.py owns its windows; kept for API symmetry
 
 # --- Model -----------------------------------------------------------------

@@ -1,20 +1,21 @@
 """
-Factor library: 305 price/volume/microstructure/derivatives factors.
+Factor library: 332 price/volume/microstructure/derivatives factors.
 
 Every factor is computed from data observable AT or BEFORE the bar it is
 attached to. There is no bfill anywhere; the rolling warm-up period is dropped.
 
-Families (single-asset: 241)
+Families (single-asset: 248)
     A  return / momentum           35
     B  volatility                  30
-    C  range & candle structure    27
+    C  range & candle structure    34   (incl. Donchian box breakout)
     D  trend / moving average      38
     E  oscillators / reversion     22
     F  volume & liquidity          37
     G  taker flow (microstructure) 16
     H  derivatives (funding/basis) 34
        calendar (day-of-week)       2
-Cross-sectional & market: 64        (computed across assets, see build_panel)
+Cross-sectional & market: 84        (computed across assets, incl. BTC/ETH
+                                     leader state & correlations, see build_panel)
 
 NOTE: walk-forward showed the 305-feature set DILUTES the selection head's
 RankIC versus the previous 158-feature set at default LGB_PARAMS (the new
@@ -184,6 +185,20 @@ def compute_factors(df):
     intraday = (c - o) / (o + EPS)
     for w in [5, 14]:
         f[f'intraday_ret_{w}d'] = intraday.rolling(w).mean()
+    # --- box breakout (Donchian) ---
+    # The box is the PRIOR w-day range (shifted, so today's bar can break it).
+    # breakout_up > 0 means the close cleared the box top, magnitude = by how
+    # much; box_width is the consolidation tightness; box_squeeze ranks that
+    # width inside its own trailing 120d -- a narrow box before the break is
+    # the classic setup.
+    for w in [20, 55]:
+        box_hi = h.shift(1).rolling(w).max()
+        box_lo = l.shift(1).rolling(w).min()
+        f[f'breakout_up_{w}d'] = c / (box_hi + EPS) - 1
+        f[f'box_width_{w}d'] = (box_hi - box_lo) / (c + EPS)
+    f['breakout_dn_20d'] = c / (l.shift(1).rolling(20).min() + EPS) - 1
+    f['box_squeeze_20d'] = f['box_width_20d'].rolling(120).rank(pct=True)
+    f['breakout_volconf_20d'] = f['breakout_up_20d'].clip(lower=0) * _z(v, 5)
 
     # ---- D. trend / moving average (22) ----
     for w in [5, 10, 20, 50, 100, 200]:
@@ -455,10 +470,17 @@ CS_RANK_BASE = [
     'vol_30d', 'parkinson_14d', 'taker_imb_14d', 'funding_z_14d',
     'funding_cum_30d', 'basis_z_14d', 'obv_slope_14d', 'amihud_14d', 'mfi_14',
     'macd_hist', 'bb_pct_20d', 'zscore_20d', 'drawdown_30d', 'eff_ratio_30d',
+    # breakout leadership: who broke the box first, and from the tightest box
+    'breakout_up_20d', 'box_squeeze_20d',
 ]
 CS_Z_BASE = ['ret_7d', 'vol_14d', 'funding_mean_7d',
              'ret_30d', 'taker_imb_7d', 'basis_mean_7d', 'log_dollar_vol_30d',
              'sharpe_mom_30d']
+
+# Market leaders whose own state is injected into every coin's feature row.
+LEADERS = {'btc': 'BTCUSDT', 'eth': 'ETHUSDT'}
+LEADER_STATE_COLS = ['ret_7d', 'ret_30d', 'vol_14d', 'rsi_14d',
+                     'funding_mean_7d', 'sma_ratio_50d']
 
 
 def add_cross_sectional(panel, benchmark='BTCUSDT'):
@@ -500,6 +522,20 @@ def add_cross_sectional(panel, benchmark='BTCUSDT'):
     for w in [1, 7, 30]:
         p[f'exc_ret_{w}d'] = p[f'ret_{w}d'] - p[f'mkt_ret_{w}d']
 
+    # --- leadership (龙头): who leads the tape, who holds up on red days ---
+    by_sym = lambda s: s.groupby(level='Symbol', group_keys=False)
+    # frequency in the top quartile of the DAILY cross-sectional return rank
+    day_rank = g['ret_1d'].rank(pct=True)
+    p['lead_freq_30d'] = by_sym((day_rank > 0.75).astype(float)).apply(
+        lambda s: s.rolling(30).mean())
+    # relative return earned specifically on market-down days (抗跌性):
+    # leaders bleed less than the tape when the tape is red
+    rel1 = p['exc_ret_1d']
+    down = (p['mkt_ret_1d'] < 0).astype(float)
+    num = by_sym(rel1 * down).apply(lambda s: s.rolling(30).sum())
+    den = by_sym(down).apply(lambda s: s.rolling(30).sum())
+    p['down_mkt_alpha_30d'] = num / (den + EPS)
+
     # --- relative to the benchmark ---
     bench = p.xs(benchmark, level='Symbol') if benchmark in p.index.get_level_values('Symbol') else None
     if bench is not None:
@@ -529,6 +565,33 @@ def add_cross_sectional(panel, benchmark='BTCUSDT'):
             pd.Series(bench['ret_1d'].rolling(30).std().reindex(
                 p.index.get_level_values('Date')).values, index=p.index) ** 2
         p['idio_vol_30d'] = np.sqrt(resid_var.clip(lower=0))
+
+    # --- market leaders: BTC & ETH state injected into every coin's row ---
+    # BTC and ETH lead this market. Two kinds of features:
+    #   {btc,eth}_<state>    the leader's OWN momentum/vol/RSI/funding/trend,
+    #                        broadcast per date (regime context, like mkt_*)
+    #   corr_eth_30d etc.    each coin's trailing 30d correlation with the
+    #                        leader (corr with BTC already exists as
+    #                        corr_bench_30d), plus relative strength vs ETH
+    #                        and the BTC-vs-ETH allegiance spread.
+    dates_idx = p.index.get_level_values('Date')
+    for tag, sym in LEADERS.items():
+        if sym not in p.index.get_level_values('Symbol'):
+            continue
+        lead = p.xs(sym, level='Symbol')
+        for col in LEADER_STATE_COLS:
+            p[f'{tag}_{col}'] = lead[col].reindex(dates_idx).values
+        if sym == benchmark:
+            continue    # correlation/relative features vs BTC already exist
+        lead_r1 = pd.Series(lead['ret_1d'].reindex(dates_idx).values, index=p.index)
+        tmp = pd.DataFrame({'_r': p['ret_1d'], '_b': lead_r1})
+        p[f'corr_{tag}_30d'] = tmp.groupby(level='Symbol', group_keys=False).apply(
+            lambda s: s['_r'].rolling(30).corr(s['_b']))
+        for w in [7, 30]:
+            p[f'rel_ret_{w}d_vs_{tag}'] = p[f'ret_{w}d'] - p[f'{tag}_ret_{w}d']
+    if 'corr_bench_30d' in p and 'corr_eth_30d' in p:
+        # which camp does the coin follow: +1 = trades with BTC, -1 = with ETH
+        p['lead_corr_spread_30d'] = p['corr_bench_30d'] - p['corr_eth_30d']
 
     return p
 
