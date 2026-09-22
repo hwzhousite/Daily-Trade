@@ -48,7 +48,15 @@ def load_panel(refresh=False, collect_short=False, verbose=True):
 
 def train(panel, wf_step=None, validate=True, verbose=True):
     banner("Training LightGBM heads" + ("" if validate else " (production refit only)"))
-    return M.train_all(panel, wf_step=wf_step, validate=validate, verbose=verbose)
+    results = M.train_all(panel, wf_step=wf_step, validate=validate, verbose=verbose)
+    mkt_preds = mkt_metrics = None
+    if validate:
+        mkt_preds, mkt_metrics = M.walk_forward_market(panel, wf_step=wf_step,
+                                                       verbose=verbose)
+    results['market'] = {'bundle': M.fit_market(panel, wf_metrics=mkt_metrics,
+                                                wf_preds=mkt_preds),
+                         'wf_metrics': mkt_metrics}
+    return results
 
 
 def backtest(results, top_n=None, prob_threshold=None, cost_bps=None,
@@ -72,6 +80,14 @@ def tonight(panel, top_n=None, capital=None, use_timing_gate=None,
             prob_threshold=None, exit_rank_mult=None, save_plan=True, top_show=15):
     """Score tonight's bar and build the plan. This is the nightly deliverable."""
     banner("Tonight's forecast")
+
+    mkt = M.market_forecast(panel)
+    if mkt:
+        wfm = mkt.get('wf_metrics') or {}
+        cal = (f" (walk-forward Brier {wfm['brier']:.3f}, base {wfm['base_rate']:.1%})"
+               if wfm else " (not walk-forward validated yet; run `backtest`)")
+        print(f"Market (44-coin equal weight): P(up tomorrow) = "
+              f"{mkt['prob_up']:.1%}{cal}")
 
     _prev_df, _prev_date, prev_holdings = pp.load_previous_plan(
         panel.index.get_level_values('Date').max())
@@ -120,6 +136,8 @@ def run_full(refresh=False, wf_step=None, top_n=None, capital=None, cost_bps=Non
     results = train(panel, wf_step=wf_step, validate=True)
 
     for name, res in results.items():
+        if res.get('importances') is None:      # the market head carries none
+            continue
         print(f"\n--- {name}: top 12 features by gain ---")
         print(res['importances'].head(12).to_string(index=False))
 

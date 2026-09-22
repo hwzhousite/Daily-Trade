@@ -131,6 +131,17 @@ NON_FEATURE_COLS = [
     'target_high_1d', 'target_low_1d', 'funding_next_1d', 'target_net_1d',
 ]
 
+# --- Market head ------------------------------------------------------------
+# A fifth, DATE-LEVEL head: P(the equal-weight market closes up tomorrow),
+# driven by the BTC/ETH leader-state and mkt_* aggregate features. One row per
+# date (~1000 samples), so the tree is kept tiny and heavily regularized.
+MARKET_PARAMS = dict(
+    n_estimators=200, learning_rate=0.03, num_leaves=7, max_depth=3,
+    min_child_samples=20, subsample=0.8, subsample_freq=1,
+    colsample_bytree=0.6, reg_alpha=0.5, reg_lambda=3.0,
+    random_state=42, n_jobs=-1, verbosity=-1,
+)
+
 # --- Selection ensemble & confidence ---------------------------------------
 # LightGBM is boosting, so it has no random-forest OOB property; the
 # equivalent is a BAG of independently seeded fits, whose disagreement is an
