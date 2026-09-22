@@ -1,20 +1,20 @@
 """
-Factor library: 321 price/volume/microstructure/derivatives factors.
+Factor library: 332 price/volume/microstructure/derivatives factors.
 
 Every factor is computed from data observable AT or BEFORE the bar it is
 attached to. There is no bfill anywhere; the rolling warm-up period is dropped.
 
-Families (single-asset: 241)
+Families (single-asset: 248)
     A  return / momentum           35
     B  volatility                  30
-    C  range & candle structure    27
+    C  range & candle structure    34   (incl. Donchian box breakout)
     D  trend / moving average      38
     E  oscillators / reversion     22
     F  volume & liquidity          37
     G  taker flow (microstructure) 16
     H  derivatives (funding/basis) 34
        calendar (day-of-week)       2
-Cross-sectional & market: 80        (computed across assets, incl. BTC/ETH
+Cross-sectional & market: 84        (computed across assets, incl. BTC/ETH
                                      leader state & correlations, see build_panel)
 
 NOTE: walk-forward showed the 305-feature set DILUTES the selection head's
@@ -185,6 +185,20 @@ def compute_factors(df):
     intraday = (c - o) / (o + EPS)
     for w in [5, 14]:
         f[f'intraday_ret_{w}d'] = intraday.rolling(w).mean()
+    # --- box breakout (Donchian) ---
+    # The box is the PRIOR w-day range (shifted, so today's bar can break it).
+    # breakout_up > 0 means the close cleared the box top, magnitude = by how
+    # much; box_width is the consolidation tightness; box_squeeze ranks that
+    # width inside its own trailing 120d -- a narrow box before the break is
+    # the classic setup.
+    for w in [20, 55]:
+        box_hi = h.shift(1).rolling(w).max()
+        box_lo = l.shift(1).rolling(w).min()
+        f[f'breakout_up_{w}d'] = c / (box_hi + EPS) - 1
+        f[f'box_width_{w}d'] = (box_hi - box_lo) / (c + EPS)
+    f['breakout_dn_20d'] = c / (l.shift(1).rolling(20).min() + EPS) - 1
+    f['box_squeeze_20d'] = f['box_width_20d'].rolling(120).rank(pct=True)
+    f['breakout_volconf_20d'] = f['breakout_up_20d'].clip(lower=0) * _z(v, 5)
 
     # ---- D. trend / moving average (22) ----
     for w in [5, 10, 20, 50, 100, 200]:
@@ -456,6 +470,8 @@ CS_RANK_BASE = [
     'vol_30d', 'parkinson_14d', 'taker_imb_14d', 'funding_z_14d',
     'funding_cum_30d', 'basis_z_14d', 'obv_slope_14d', 'amihud_14d', 'mfi_14',
     'macd_hist', 'bb_pct_20d', 'zscore_20d', 'drawdown_30d', 'eff_ratio_30d',
+    # breakout leadership: who broke the box first, and from the tightest box
+    'breakout_up_20d', 'box_squeeze_20d',
 ]
 CS_Z_BASE = ['ret_7d', 'vol_14d', 'funding_mean_7d',
              'ret_30d', 'taker_imb_7d', 'basis_mean_7d', 'log_dollar_vol_30d',
@@ -505,6 +521,20 @@ def add_cross_sectional(panel, benchmark='BTCUSDT'):
     # --- excess over the market (cross-sectionally demeaned momentum) ---
     for w in [1, 7, 30]:
         p[f'exc_ret_{w}d'] = p[f'ret_{w}d'] - p[f'mkt_ret_{w}d']
+
+    # --- leadership (龙头): who leads the tape, who holds up on red days ---
+    by_sym = lambda s: s.groupby(level='Symbol', group_keys=False)
+    # frequency in the top quartile of the DAILY cross-sectional return rank
+    day_rank = g['ret_1d'].rank(pct=True)
+    p['lead_freq_30d'] = by_sym((day_rank > 0.75).astype(float)).apply(
+        lambda s: s.rolling(30).mean())
+    # relative return earned specifically on market-down days (抗跌性):
+    # leaders bleed less than the tape when the tape is red
+    rel1 = p['exc_ret_1d']
+    down = (p['mkt_ret_1d'] < 0).astype(float)
+    num = by_sym(rel1 * down).apply(lambda s: s.rolling(30).sum())
+    den = by_sym(down).apply(lambda s: s.rolling(30).sum())
+    p['down_mkt_alpha_30d'] = num / (den + EPS)
 
     # --- relative to the benchmark ---
     bench = p.xs(benchmark, level='Symbol') if benchmark in p.index.get_level_values('Symbol') else None
