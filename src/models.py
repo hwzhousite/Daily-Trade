@@ -145,13 +145,18 @@ def daily_feature_ic(df, features, target, min_assets=5):
     `embargo` bars before the test window leaks nothing the fit itself doesn't.
     """
     rows = {}
-    for date, grp in df.groupby('Date'):
-        if len(grp) < min_assets:
-            continue
-        tgt_rank = grp[target].rank()
-        if tgt_rank.nunique() < 2:
-            continue
-        rows[date] = grp[features].rank().corrwith(tgt_rank)
+    # Date-broadcast features (mkt_*, btc_*, eth_*) are CONSTANT within a
+    # date: their cross-sectional correlation is undefined (NaN), which is
+    # semantically right -- but np.corrcoef under corrwith warns about the
+    # zero-variance divide. Silence exactly that, locally.
+    with np.errstate(invalid='ignore', divide='ignore'):
+        for date, grp in df.groupby('Date'):
+            if len(grp) < min_assets:
+                continue
+            tgt_rank = grp[target].rank()
+            if tgt_rank.nunique() < 2:
+                continue
+            rows[date] = grp[features].rank().corrwith(tgt_rank)
     ic = pd.DataFrame(rows).T
     ic.index.name = 'Date'
     return ic
