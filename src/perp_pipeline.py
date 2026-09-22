@@ -49,10 +49,12 @@ def load_panel(refresh=False, collect_short=False, verbose=True):
 def train(panel, wf_step=None, validate=True, verbose=True):
     banner("Training LightGBM heads" + ("" if validate else " (production refit only)"))
     results = M.train_all(panel, wf_step=wf_step, validate=validate, verbose=verbose)
-    mkt_metrics = None
+    mkt_preds = mkt_metrics = None
     if validate:
-        _, mkt_metrics = M.walk_forward_market(panel, wf_step=wf_step, verbose=verbose)
-    results['market'] = {'bundle': M.fit_market(panel, wf_metrics=mkt_metrics),
+        mkt_preds, mkt_metrics = M.walk_forward_market(panel, wf_step=wf_step,
+                                                       verbose=verbose)
+    results['market'] = {'bundle': M.fit_market(panel, wf_metrics=mkt_metrics,
+                                                wf_preds=mkt_preds),
                          'wf_metrics': mkt_metrics}
     return results
 

@@ -575,7 +575,32 @@ def walk_forward_market(panel, wf_step=None, train_window=None, verbose=True):
     return preds, out
 
 
-def fit_market(panel, save=True, wf_metrics=None):
+def fit_market_calibration(wf_preds):
+    """
+    Platt scaling on the walk-forward predictions: p' = sigmoid(a*logit(p)+b).
+
+    The raw head is ANTI-calibrated at the tails (its confident calls were no
+    better than the base rate), so this 2-parameter map compresses the output
+    toward honesty -- the same philosophy as the range heads' conformal step.
+    """
+    from sklearn.linear_model import LogisticRegression
+    p = np.clip(wf_preds['prediction'].values, 1e-4, 1 - 1e-4)
+    X = np.log(p / (1 - p)).reshape(-1, 1)
+    y = wf_preds['mkt_up_next_1d'].values
+    lr = LogisticRegression(C=1e6)
+    lr.fit(X, y)
+    return {'a': float(lr.coef_[0, 0]), 'b': float(lr.intercept_[0])}
+
+
+def apply_market_calibration(prob, calib):
+    if not calib:
+        return prob
+    p = np.clip(prob, 1e-4, 1 - 1e-4)
+    z = calib['a'] * np.log(p / (1 - p)) + calib['b']
+    return 1.0 / (1.0 + np.exp(-z))
+
+
+def fit_market(panel, save=True, wf_metrics=None, wf_preds=None):
     """Production market head: fit on all history, persist, return the bundle."""
     frame = build_market_frame(panel)
     fit = frame.dropna(subset=['mkt_up_next_1d'])
@@ -583,12 +608,21 @@ def fit_market(panel, save=True, wf_metrics=None):
     m = LGBMClassifier(objective='binary', **config.MARKET_PARAMS)
     m.fit(fit[feats], fit['mkt_up_next_1d'])
 
+    calib = fit_market_calibration(wf_preds) if wf_preds is not None else None
     bundle = {'model': m, 'head': 'market', 'task': 'binary',
               'target': 'mkt_up_next_1d', 'features': feats,
-              'lgb_params': dict(config.MARKET_PARAMS),
+              'lgb_params': dict(config.MARKET_PARAMS), 'calib': calib,
               'trained_at': pd.Timestamp.now(tz='UTC').isoformat(),
               'train_rows': int(len(fit)), 'wf_metrics': wf_metrics,
               'train_end': pd.Timestamp(fit.index.max()).isoformat()}
+    # A nightly refit without validation must not drop an existing calibration.
+    if calib is None:
+        existing = str(config.model_path('market'))
+        if os.path.exists(existing):
+            try:
+                bundle['calib'] = joblib.load(existing).get('calib')
+            except Exception:
+                pass
     if save:
         path = str(config.model_path('market'))
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -608,8 +642,10 @@ def market_forecast(panel, bundle=None):
         bundle = joblib.load(path)
     frame = build_market_frame(panel)
     last = frame.iloc[[-1]]
-    prob = float(bundle['model'].predict_proba(last[bundle['features']])[0, 1])
-    return {'as_of': frame.index[-1], 'prob_up': prob,
+    raw = float(bundle['model'].predict_proba(last[bundle['features']])[0, 1])
+    prob = float(apply_market_calibration(raw, bundle.get('calib')))
+    return {'as_of': frame.index[-1], 'prob_up': prob, 'prob_up_raw': raw,
+            'calibrated': bundle.get('calib') is not None,
             'wf_metrics': bundle.get('wf_metrics')}
 
 
