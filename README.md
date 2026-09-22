@@ -169,11 +169,16 @@ P(up) 分档      样本数    次日平均收益
 `exc_ret_*`（超额于市场均值，3 个）、`rel_ret_*_vs_bench`（相对 BTC，**4** 个）、
 `beta_bench_*` / `corr_bench_*`（4 个）、`idio_vol_30d`。
 
-**领导币特征（16，2026-09-22 新增）**：BTC 和 ETH 主导市场——每币与 ETH 的
+**领导币特征（16，2026-09-22 新增，已验证）**：BTC 和 ETH 主导市场——每币与 ETH 的
 30 日滚动相关 `corr_eth_30d`（与 BTC 的即 `corr_bench_30d`）、阵营谱
-`lead_corr_spread_30d`（corr_BTC − corr_ETH）、相对 ETH 强度
-`rel_ret_{7,30}d_vs_eth`，以及两个领导币自身状态按日广播：
-`{btc,eth}_{ret_7d, ret_30d, vol_14d, rsi_14d, funding_mean_7d, sma_ratio_50d}`。
+`lead_corr_spread_30d`（corr_BTC − corr_ETH，单变量 IC +0.021，16 个里最强）、
+相对 ETH 强度 `rel_ret_{7,30}d_vs_eth`，以及两个领导币自身状态按日广播：
+`{btc,eth}_{ret_7d, ret_30d, vol_14d, rsi_14d, funding_mean_7d, sma_ratio_50d}`
+（按日广播的特征横截面 IC 无定义，靠树的交互项起作用）。
+
+消融（selection 头，集成均值）：wf40 +0.0309 → **+0.0346 (t=4.00)**；
+wf10 终审 +0.0184 → **+0.0206 (t=+2.38)**。两个口径都是正贡献，纳入策展池
+（236 → 252 特征）。
 
 横截面因子是排序模型真正需要的——一个孤立的动量值说不出这个币今天是不是最强的。
 
