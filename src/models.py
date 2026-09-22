@@ -506,6 +506,113 @@ def train_all(panel, features=None, wf_step=None, params=None, verbose=True,
     return results
 
 
+# --- market head: date-level P(market up tomorrow) --------------------------
+
+MARKET_FEATURE_PREFIXES = ('btc_', 'eth_', 'mkt_', 'dow_')
+
+
+def build_market_frame(panel):
+    """
+    One row per date: the date-broadcast features (BTC/ETH leader state,
+    mkt_* aggregates, calendar) plus BTC/ETH's own 1d returns, labelled with
+    whether the equal-weight market closes up TOMORROW.
+
+    This is a time-series problem (~1000 rows), not a cross-sectional one --
+    hence its own tiny, heavily regularized model (config.MARKET_PARAMS).
+    """
+    p = panel.reset_index()
+    date_cols = [c for c in p.columns if c.startswith(MARKET_FEATURE_PREFIXES)]
+    frame = p.groupby('Date')[date_cols].first()
+
+    for tag, sym in _factors.LEADERS.items():
+        if sym in p['Symbol'].values:
+            s = p[p['Symbol'] == sym].set_index('Date')
+            frame[f'{tag}_ret_1d'] = s['ret_1d']
+            frame[f'{tag}_close_loc_14d'] = s['close_loc_14d']
+
+    mkt_next = p.groupby('Date')['target_ret_1d'].mean()
+    frame['mkt_ret_next_1d'] = mkt_next
+    frame['mkt_up_next_1d'] = (mkt_next > 0).astype(float)
+    frame.loc[mkt_next.isna(), 'mkt_up_next_1d'] = np.nan
+    return frame
+
+
+def market_feature_cols(frame):
+    return [c for c in frame.columns if c not in ('mkt_ret_next_1d', 'mkt_up_next_1d')]
+
+
+def walk_forward_market(panel, wf_step=None, train_window=None, verbose=True):
+    """Embargoed walk-forward for the market head (embargo=1, like timing)."""
+    wf_step = wf_step or config.WF_STEP
+    train_window = train_window or config.TRAIN_WINDOW
+    frame = build_market_frame(panel).dropna(subset=['mkt_up_next_1d'])
+    feats = market_feature_cols(frame)
+    dates = frame.index.to_numpy()
+
+    folds = []
+    for i in range(train_window + 1, len(dates), wf_step):
+        tr = frame.iloc[i - 1 - train_window: i - 1]
+        te = frame.iloc[i: i + wf_step].copy()
+        if tr.empty or te.empty or tr['mkt_up_next_1d'].nunique() < 2:
+            continue
+        m = LGBMClassifier(objective='binary', **config.MARKET_PARAMS)
+        m.fit(tr[feats], tr['mkt_up_next_1d'])
+        te['prediction'] = m.predict_proba(te[feats])[:, 1]
+        folds.append(te)
+
+    preds = pd.concat(folds)
+    y, pr = preds['mkt_up_next_1d'].values, preds['prediction'].values
+    out = {
+        'n': int(len(preds)),
+        'auc': float(roc_auc_score(y, pr)) if len(np.unique(y)) > 1 else np.nan,
+        'brier': float(brier_score_loss(y, pr)),
+        'base_rate': float(np.mean(y)), 'mean_pred': float(np.mean(pr)),
+    }
+    if verbose:
+        print(f"  [market] AUC {out['auc']:.4f} | Brier {out['brier']:.4f} | "
+              f"base {out['base_rate']:.3f} vs pred {out['mean_pred']:.3f} | "
+              f"n={out['n']:,}  ({len(folds)} folds)")
+    return preds, out
+
+
+def fit_market(panel, save=True, wf_metrics=None):
+    """Production market head: fit on all history, persist, return the bundle."""
+    frame = build_market_frame(panel)
+    fit = frame.dropna(subset=['mkt_up_next_1d'])
+    feats = market_feature_cols(frame)
+    m = LGBMClassifier(objective='binary', **config.MARKET_PARAMS)
+    m.fit(fit[feats], fit['mkt_up_next_1d'])
+
+    bundle = {'model': m, 'head': 'market', 'task': 'binary',
+              'target': 'mkt_up_next_1d', 'features': feats,
+              'lgb_params': dict(config.MARKET_PARAMS),
+              'trained_at': pd.Timestamp.now(tz='UTC').isoformat(),
+              'train_rows': int(len(fit)), 'wf_metrics': wf_metrics,
+              'train_end': pd.Timestamp(fit.index.max()).isoformat()}
+    if save:
+        path = str(config.model_path('market'))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f'{path}.tmp'
+        joblib.dump(bundle, tmp)
+        os.replace(tmp, path)
+        bundle['path'] = path
+    return bundle
+
+
+def market_forecast(panel, bundle=None):
+    """P(equal-weight market up tomorrow) from the latest bar."""
+    if bundle is None:
+        path = str(config.model_path('market'))
+        if not os.path.exists(path):
+            return None
+        bundle = joblib.load(path)
+    frame = build_market_frame(panel)
+    last = frame.iloc[[-1]]
+    prob = float(bundle['model'].predict_proba(last[bundle['features']])[0, 1])
+    return {'as_of': frame.index[-1], 'prob_up': prob,
+            'wf_metrics': bundle.get('wf_metrics')}
+
+
 # --- hyperparameter tuning --------------------------------------------------
 
 TUNE_SPACE = {
