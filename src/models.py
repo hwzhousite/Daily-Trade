@@ -649,6 +649,125 @@ def market_forecast(panel, bundle=None):
             'wf_metrics': bundle.get('wf_metrics')}
 
 
+# --- regime head: date-level P(market up over the next 7 days) ---------------
+
+REGIME_LEADERS = {'btc': 'BTCUSDT', 'eth': 'ETHUSDT', 'sol': 'SOLUSDT'}
+REGIME_LEADER_COLS = ['ret_1d', 'ret_7d', 'ret_30d', 'vol_14d', 'rsi_14d',
+                      'funding_mean_7d', 'sma_ratio_50d', 'close_loc_14d',
+                      'breakout_up_20d', 'macd_hist', 'basis_mean_7d']
+
+
+def build_regime_frame(panel):
+    """
+    One row per date: BTC/ETH/SOL single-asset states (pulled straight from
+    their panel rows) plus the mkt_*/calendar aggregates, labelled with
+    whether the equal-weight market closes up over the NEXT 7 DAYS.
+    """
+    p = panel.reset_index()
+    date_cols = [c for c in p.columns if c.startswith(('mkt_', 'dow_'))]
+    frame = p.groupby('Date')[date_cols].first()
+
+    for tag, sym in REGIME_LEADERS.items():
+        s = p[p['Symbol'] == sym].set_index('Date')
+        for col in REGIME_LEADER_COLS:
+            if col in s:
+                frame[f'{tag}_{col}'] = s[col]
+
+    fwd = p.groupby('Date')['target_ret_7d'].mean()
+    frame['mkt_ret_next_7d'] = fwd
+    frame['mkt_up_next_7d'] = (fwd > 0).astype(float)
+    frame.loc[fwd.isna(), 'mkt_up_next_7d'] = np.nan
+    return frame
+
+
+def regime_feature_cols(frame):
+    return [c for c in frame.columns if c not in ('mkt_ret_next_7d', 'mkt_up_next_7d')]
+
+
+def walk_forward_regime(panel, wf_step=None, train_window=None, verbose=True):
+    """Walk-forward with a 7-DAY embargo: the 7d label overlaps rows."""
+    wf_step = wf_step or config.WF_STEP
+    train_window = train_window or config.TRAIN_WINDOW
+    frame = build_regime_frame(panel).dropna(subset=['mkt_up_next_7d'])
+    feats = regime_feature_cols(frame)
+
+    folds = []
+    for i in range(train_window + 7, len(frame), wf_step):
+        tr = frame.iloc[i - 7 - train_window: i - 7]
+        te = frame.iloc[i: i + wf_step].copy()
+        if tr.empty or te.empty or tr['mkt_up_next_7d'].nunique() < 2:
+            continue
+        m = LGBMClassifier(objective='binary', **config.REGIME_PARAMS)
+        m.fit(tr[feats], tr['mkt_up_next_7d'])
+        te['prediction'] = m.predict_proba(te[feats])[:, 1]
+        folds.append(te)
+
+    preds = pd.concat(folds)
+    y, pr = preds['mkt_up_next_7d'].values, preds['prediction'].values
+    out = {'n': int(len(preds)),
+           'n_effective': int(len(preds) / 7),   # overlapping 7d labels
+           'auc': float(roc_auc_score(y, pr)) if len(np.unique(y)) > 1 else np.nan,
+           'brier': float(brier_score_loss(y, pr)),
+           'base_rate': float(np.mean(y)), 'mean_pred': float(np.mean(pr))}
+    if verbose:
+        print(f"  [regime7d] AUC {out['auc']:.4f} | Brier {out['brier']:.4f} | "
+              f"base {out['base_rate']:.3f} vs pred {out['mean_pred']:.3f} | "
+              f"n={out['n']:,} (~{out['n_effective']} effective)  ({len(folds)} folds)")
+    return preds, out
+
+
+def fit_regime(panel, save=True, wf_metrics=None, wf_preds=None):
+    """Production regime head with Platt calibration from the walk-forward."""
+    frame = build_regime_frame(panel)
+    fit = frame.dropna(subset=['mkt_up_next_7d'])
+    feats = regime_feature_cols(frame)
+    m = LGBMClassifier(objective='binary', **config.REGIME_PARAMS)
+    m.fit(fit[feats], fit['mkt_up_next_7d'])
+
+    calib = None
+    if wf_preds is not None:
+        calib = fit_market_calibration(
+            wf_preds.rename(columns={'mkt_up_next_7d': 'mkt_up_next_1d'}))
+    bundle = {'model': m, 'head': 'regime', 'task': 'binary',
+              'target': 'mkt_up_next_7d', 'features': feats, 'calib': calib,
+              'lgb_params': dict(config.REGIME_PARAMS),
+              'trained_at': pd.Timestamp.now(tz='UTC').isoformat(),
+              'train_rows': int(len(fit)), 'wf_metrics': wf_metrics,
+              'train_end': pd.Timestamp(fit.index.max()).isoformat()}
+    if calib is None:
+        existing = str(config.model_path('regime'))
+        if os.path.exists(existing):
+            try:
+                bundle['calib'] = joblib.load(existing).get('calib')
+            except Exception:
+                pass
+    if save:
+        path = str(config.model_path('regime'))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f'{path}.tmp'
+        joblib.dump(bundle, tmp)
+        os.replace(tmp, path)
+        bundle['path'] = path
+    return bundle
+
+
+def regime_forecast(panel, bundle=None):
+    """P(market up over the next 7 days) and the implied stance."""
+    if bundle is None:
+        path = str(config.model_path('regime'))
+        if not os.path.exists(path):
+            return None
+        bundle = joblib.load(path)
+    frame = build_regime_frame(panel)
+    last = frame.iloc[[-1]]
+    raw = float(bundle['model'].predict_proba(last[bundle['features']])[0, 1])
+    prob = float(apply_market_calibration(raw, bundle.get('calib')))
+    return {'as_of': frame.index[-1], 'prob_up': prob, 'prob_up_raw': raw,
+            'stance': 'LONG' if prob >= 0.5 else 'SHORT',
+            'calibrated': bundle.get('calib') is not None,
+            'wf_metrics': bundle.get('wf_metrics')}
+
+
 # --- hyperparameter tuning --------------------------------------------------
 
 TUNE_SPACE = {

@@ -142,6 +142,19 @@ MARKET_PARAMS = dict(
     random_state=42, n_jobs=-1, verbosity=-1,
 )
 
+# --- Regime head (7d market direction) --------------------------------------
+# Date-level P(equal-weight market up over the NEXT 7 DAYS), driven by the
+# BTC/ETH/SOL leader states. The 7d label overlaps across consecutive rows,
+# so the effective sample is ~1/7th of the row count: the tree stays tiny and
+# the walk-forward carries a 7-day embargo like the selection head.
+REGIME_PARAMS = dict(
+    n_estimators=200, learning_rate=0.03, num_leaves=7, max_depth=3,
+    min_child_samples=25, subsample=0.8, subsample_freq=1,
+    colsample_bytree=0.6, reg_alpha=0.5, reg_lambda=3.0,
+    random_state=42, n_jobs=-1, verbosity=-1,
+)
+REGIME_N_RECOMMEND = 3     # coins recommended per day by the regime cascade
+
 # --- Selection ensemble & confidence ---------------------------------------
 # LightGBM is boosting, so it has no random-forest OOB property; the
 # equivalent is a BAG of independently seeded fits, whose disagreement is an
