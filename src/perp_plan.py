@@ -51,7 +51,11 @@ def build_plan(signals, held, meta, capital=None, plans_dir=None, save=True):
     held_set = set(held)
     # 1/top_n per name, NOT 1/len(held): with the daily entry limit an
     # under-filled book keeps the empty slots in cash instead of concentrating.
-    per_name = 1.0 / meta['top_n']
+    # The signal-health multiplier (rolling IC t-stat monitor) scales every
+    # position when the selection signal is unhealthy.
+    health_mult = float((meta.get('health') or {}).get('multiplier', 1.0)) \
+        if config.USE_SIGNAL_HEALTH else 1.0
+    per_name = health_mult / meta['top_n']
     plan['Target_Weight'] = plan['Symbol'].map(
         lambda s: per_name if s in held_set else 0.0)
     plan['Target_Notional'] = plan['Target_Weight'] * capital
@@ -125,6 +129,9 @@ def plan_summary(plan, meta):
         'Gross exposure': f"{gross:,.0f} / {cap:,.0f} ({gross/cap:.0%})",
         'Turnover vs prev plan': f"{turnover:.2f} (~{turnover*config.COST_BPS/1e4*cap:,.2f} in fees)",
         'Prev plan': plan['Prev_Plan_Date'].iloc[0],
+        'Signal health': (lambda h: f"rolling t {h['roll_t']:+.2f} -> exposure x{h['multiplier']:.2f}"
+                          if h and h.get('roll_t') is not None
+                          else 'not measured (run backtest)')(meta.get('health')),
         'Range calibration': ', '.join(
             f"{k.replace('range_','')} {v['calibrated_coverage']:.1%}/{v['target_coverage']:.0%}"
             for k, v in (conf or {}).items() if v) or 'not calibrated (run backtest)',

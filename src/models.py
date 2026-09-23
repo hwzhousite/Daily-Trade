@@ -271,6 +271,35 @@ def format_metrics(name, m):
             f"(t={m['ic_t_stat']:+.2f}) | hit {m['hit_rate']:.3f} | n={m['n']:,}")
 
 
+def signal_health(wf_preds, pred_col='prediction', window=None,
+                  min_periods=None, embargo=None):
+    """
+    Rolling t-stat of the selection signal's daily cross-sectional IC.
+
+    The IC at day d uses the 7d label, observable only at d+7 -- so the
+    series is shifted by `embargo` bars and the value AT day d is fully
+    point-in-time. Returns a frame [ic, roll_t, multiplier]; multiplier is
+    HEALTH_SCALE while roll_t < HEALTH_T_THRESHOLD, 1.0 otherwise (and 1.0
+    while the window is still warming up -- the monitor abstains).
+    """
+    window = window or config.HEALTH_WINDOW
+    min_periods = min_periods or config.HEALTH_MIN_PERIODS
+    embargo = embargo if embargo is not None else config.HEALTH_EMBARGO
+
+    ics = {}
+    for d, g in wf_preds.groupby('Date'):
+        if g[pred_col].nunique() > 1 and g['target_ret_7d'].nunique() > 1:
+            ics[d] = g[pred_col].rank().corr(g['target_ret_7d'].rank())
+    ic = pd.Series(ics).sort_index()
+    n = ic.rolling(window, min_periods=min_periods).count()
+    mu = ic.rolling(window, min_periods=min_periods).mean()
+    sd = ic.rolling(window, min_periods=min_periods).std()
+    t = (mu / (sd / np.sqrt(n))).shift(embargo)
+    mult = t.apply(lambda v: 1.0 if (pd.isna(v) or v >= config.HEALTH_T_THRESHOLD)
+                   else config.HEALTH_SCALE)
+    return pd.DataFrame({'ic': ic, 'roll_t': t, 'multiplier': mult})
+
+
 def fit_conformal(wf_preds, head, calib_days=None):
     """
     Conformal calibration for a quantile head.
@@ -390,7 +419,7 @@ def walk_forward(panel, head_name, features=None, wf_step=None, train_window=Non
 
 
 def fit_production(panel, head_name, features=None, params=None, save=True,
-                   conformal=None, wf_metrics=None, selector=None):
+                   conformal=None, wf_metrics=None, selector=None, health=None):
     """
     Fits on all available history and persists a bundle with its metadata.
 
@@ -441,18 +470,23 @@ def fit_production(panel, head_name, features=None, params=None, save=True,
         'n_symbols': int(df['Symbol'].nunique()),
         'conformal': conformal,
         'conformal_delta': (conformal or {}).get('delta', 0.0),
+        'health': health,
         'wf_metrics': wf_metrics,
     }
 
-    # A refit that skipped validation must not silently drop a calibration that
-    # an earlier validated run established.
-    if conformal is None and head['task'] == 'quantile':
+    # A refit that skipped validation must not silently drop a calibration or
+    # health reading that an earlier validated run established.
+    if (conformal is None and head['task'] == 'quantile') or \
+            (health is None and head_name == 'selection'):
         existing = config.model_path(head_name)
         if os.path.exists(existing):
             try:
                 prev = joblib.load(existing)
-                bundle['conformal'] = prev.get('conformal')
-                bundle['conformal_delta'] = prev.get('conformal_delta', 0.0)
+                if conformal is None and head['task'] == 'quantile':
+                    bundle['conformal'] = prev.get('conformal')
+                    bundle['conformal_delta'] = prev.get('conformal_delta', 0.0)
+                if health is None and head_name == 'selection':
+                    bundle['health'] = prev.get('health')
             except Exception:
                 pass
 
@@ -485,6 +519,7 @@ def train_all(panel, features=None, wf_step=None, params=None, verbose=True,
         preds = metrics = None
         conformal = None
 
+        health = None
         if validate:
             preds, metrics = walk_forward(panel, name, features=features,
                                           wf_step=wf_step, params=params, verbose=verbose)
@@ -496,10 +531,19 @@ def train_all(panel, features=None, wf_step=None, params=None, verbose=True,
                     print(f"      conformal delta {delta:+.5f} -> coverage "
                           f"{diag['raw_coverage']:.3f} => {diag['calibrated_coverage']:.3f} "
                           f"(target {diag['target_coverage']:.2f})")
+            if name == 'selection' and config.USE_SIGNAL_HEALTH:
+                h = signal_health(preds)
+                last = h.dropna(subset=['roll_t']).iloc[-1] if h['roll_t'].notna().any() else None
+                health = {'as_of': str(h.index[-1].date()),
+                          'roll_t': float(last['roll_t']) if last is not None else None,
+                          'multiplier': float(last['multiplier']) if last is not None else 1.0}
+                if verbose:
+                    print(f"      signal health: rolling t {health['roll_t']:+.2f} "
+                          f"-> exposure x{health['multiplier']:.2f}")
 
         bundle, importances = fit_production(panel, name, features=features,
                                              params=params, conformal=conformal,
-                                             wf_metrics=metrics)
+                                             wf_metrics=metrics, health=health)
         results[name] = {'wf_predictions': preds, 'wf_metrics': metrics,
                          'conformal': conformal, 'bundle': bundle,
                          'importances': importances}
@@ -645,6 +689,151 @@ def market_forecast(panel, bundle=None):
     raw = float(bundle['model'].predict_proba(last[bundle['features']])[0, 1])
     prob = float(apply_market_calibration(raw, bundle.get('calib')))
     return {'as_of': frame.index[-1], 'prob_up': prob, 'prob_up_raw': raw,
+            'calibrated': bundle.get('calib') is not None,
+            'wf_metrics': bundle.get('wf_metrics')}
+
+
+# --- regime head: date-level P(market up over the next 7 days) ---------------
+
+REGIME_LEADERS = {'btc': 'BTCUSDT', 'eth': 'ETHUSDT', 'sol': 'SOLUSDT'}
+REGIME_LEADER_COLS = ['ret_1d', 'ret_7d', 'ret_30d', 'vol_14d', 'rsi_14d',
+                      'funding_mean_7d', 'sma_ratio_50d', 'close_loc_14d',
+                      'breakout_up_20d', 'macd_hist', 'basis_mean_7d']
+
+
+def build_regime_frame(panel):
+    """
+    One row per date: BTC/ETH/SOL single-asset states (pulled straight from
+    their panel rows) plus the mkt_*/calendar aggregates, labelled with
+    whether the equal-weight market closes up over the NEXT 7 DAYS.
+    """
+    p = panel.reset_index()
+    date_cols = [c for c in p.columns if c.startswith(('mkt_', 'dow_'))]
+    frame = p.groupby('Date')[date_cols].first()
+
+    for tag, sym in REGIME_LEADERS.items():
+        s = p[p['Symbol'] == sym].set_index('Date')
+        for col in REGIME_LEADER_COLS:
+            if col in s:
+                frame[f'{tag}_{col}'] = s[col]
+
+    fwd = p.groupby('Date')['target_ret_7d'].mean()
+    frame['mkt_ret_next_7d'] = fwd
+    frame['mkt_up_next_7d'] = (fwd > 0).astype(float)
+    frame.loc[fwd.isna(), 'mkt_up_next_7d'] = np.nan
+    return frame
+
+
+def regime_feature_cols(frame):
+    return [c for c in frame.columns if c not in ('mkt_ret_next_7d', 'mkt_up_next_7d')]
+
+
+def _monday_rows(frame):
+    return frame[frame.index.dayofweek == 0]
+
+
+def walk_forward_regime(panel, train_weeks=None, verbose=True, **_):
+    """
+    MONDAYS ONLY: the head is fitted and evaluated on Monday rows, whose 7d
+    labels run Monday-to-Monday and therefore do NOT overlap -- every test
+    point is independent. Weekly refit (the model is tiny), 1-Monday embargo.
+    """
+    train_weeks = train_weeks or config.REGIME_TRAIN_WEEKS
+    frame = build_regime_frame(panel).dropna(subset=['mkt_up_next_7d'])
+    mon = _monday_rows(frame)
+    feats = regime_feature_cols(frame)
+
+    folds = []
+    for i in range(train_weeks + 1, len(mon)):
+        tr = mon.iloc[i - 1 - train_weeks: i - 1]
+        te = mon.iloc[[i]].copy()
+        if tr['mkt_up_next_7d'].nunique() < 2:
+            continue
+        m = LGBMClassifier(objective='binary', **config.REGIME_PARAMS)
+        m.fit(tr[feats], tr['mkt_up_next_7d'])
+        te['prediction'] = m.predict_proba(te[feats])[:, 1]
+        folds.append(te)
+
+    preds = pd.concat(folds)
+    y, pr = preds['mkt_up_next_7d'].values, preds['prediction'].values
+    out = {'n': int(len(preds)),          # independent Mondays
+           'auc': float(roc_auc_score(y, pr)) if len(np.unique(y)) > 1 else np.nan,
+           'brier': float(brier_score_loss(y, pr)),
+           'base_rate': float(np.mean(y)), 'mean_pred': float(np.mean(pr))}
+    if verbose:
+        print(f"  [regime-weekly] AUC {out['auc']:.4f} | Brier {out['brier']:.4f} | "
+              f"base {out['base_rate']:.3f} vs pred {out['mean_pred']:.3f} | "
+              f"n={out['n']} independent Mondays")
+    return preds, out
+
+
+def fit_regime(panel, save=True, wf_metrics=None, wf_preds=None):
+    """Production regime head with Platt calibration from the walk-forward."""
+    frame = build_regime_frame(panel)
+    fit = _monday_rows(frame.dropna(subset=['mkt_up_next_7d']))
+    feats = regime_feature_cols(frame)
+    m = LGBMClassifier(objective='binary', **config.REGIME_PARAMS)
+    m.fit(fit[feats], fit['mkt_up_next_7d'])
+
+    calib = None
+    if wf_preds is not None:
+        calib = fit_market_calibration(
+            wf_preds.rename(columns={'mkt_up_next_7d': 'mkt_up_next_1d'}))
+    base_rate = float((wf_metrics or {}).get('base_rate',
+                                             fit['mkt_up_next_7d'].mean()))
+    bundle = {'model': m, 'head': 'regime', 'task': 'binary',
+              'target': 'mkt_up_next_7d', 'features': feats, 'calib': calib,
+              'base_rate': base_rate,
+              'lgb_params': dict(config.REGIME_PARAMS),
+              'trained_at': pd.Timestamp.now(tz='UTC').isoformat(),
+              'train_rows': int(len(fit)), 'wf_metrics': wf_metrics,
+              'train_end': pd.Timestamp(fit.index.max()).isoformat()}
+    if calib is None:
+        existing = str(config.model_path('regime'))
+        if os.path.exists(existing):
+            try:
+                bundle['calib'] = joblib.load(existing).get('calib')
+            except Exception:
+                pass
+    if save:
+        path = str(config.model_path('regime'))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f'{path}.tmp'
+        joblib.dump(bundle, tmp)
+        os.replace(tmp, path)
+        bundle['path'] = path
+    return bundle
+
+
+def regime_forecast(panel, bundle=None):
+    """
+    The week's stance: predicted from the MOST RECENT MONDAY's features and
+    held fixed until the next Monday, as the weekly prior the cascade uses.
+    """
+    if bundle is None:
+        path = str(config.model_path('regime'))
+        if not os.path.exists(path):
+            return None
+        bundle = joblib.load(path)
+    frame = build_regime_frame(panel)
+    mon = _monday_rows(frame)
+    if mon.empty:
+        return None
+    row = mon.iloc[[-1]]
+    raw = float(bundle['model'].predict_proba(row[bundle['features']])[0, 1])
+    prob = float(apply_market_calibration(raw, bundle.get('calib')))
+    # The stance compares against the BASE RATE, not 0.5: in a history where
+    # most weeks were down, a calibrated output below 50% is normal, not a
+    # bear call. Within the neutral margin the honest answer is "no view".
+    base = float(bundle.get('base_rate', 0.5))
+    edge = prob - base
+    if abs(edge) < config.REGIME_NEUTRAL_MARGIN:
+        stance = 'NEUTRAL'
+    else:
+        stance = 'LONG' if edge > 0 else 'SHORT'
+    return {'as_of': frame.index[-1], 'based_on_monday': mon.index[-1],
+            'prob_up': prob, 'prob_up_raw': raw, 'base_rate': base,
+            'edge': edge, 'stance': stance,
             'calibrated': bundle.get('calib') is not None,
             'wf_metrics': bundle.get('wf_metrics')}
 

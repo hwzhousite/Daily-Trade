@@ -50,12 +50,17 @@ def train(panel, wf_step=None, validate=True, verbose=True):
     banner("Training LightGBM heads" + ("" if validate else " (production refit only)"))
     results = M.train_all(panel, wf_step=wf_step, validate=validate, verbose=verbose)
     mkt_preds = mkt_metrics = None
+    rg_preds = rg_metrics = None
     if validate:
         mkt_preds, mkt_metrics = M.walk_forward_market(panel, wf_step=wf_step,
                                                        verbose=verbose)
+        rg_preds, rg_metrics = M.walk_forward_regime(panel, verbose=verbose)
     results['market'] = {'bundle': M.fit_market(panel, wf_metrics=mkt_metrics,
                                                 wf_preds=mkt_preds),
                          'wf_metrics': mkt_metrics}
+    results['regime'] = {'bundle': M.fit_regime(panel, wf_metrics=rg_metrics,
+                                                wf_preds=rg_preds),
+                         'wf_metrics': rg_metrics}
     return results
 
 
@@ -112,6 +117,32 @@ def tonight(panel, top_n=None, capital=None, use_timing_gate=None,
     print("\n--- Orders to execute ---")
     print(orders.to_string(index=False) if not orders.empty
           else "  (no change from the previous plan)")
+
+    # --- regime cascade: 7d stance -> 3 recommendations -> next-day bands ---
+    rg = M.regime_forecast(panel)
+    if rg and 'p_up_7d' in signals.columns and signals['p_up_7d'].notna().any():
+        banner("Regime cascade (weekly stance from BTC/ETH/SOL, set each Monday)")
+        wfm = rg.get('wf_metrics') or {}
+        cal = (f"walk-forward Brier {wfm['brier']:.3f}, base {wfm['base_rate']:.1%}, "
+               f"{wfm.get('n', '?')} independent Mondays"
+               if wfm else "not walk-forward validated yet; run `backtest`")
+        print(f"Week's stance: {rg['stance']}  |  P(up over 7d) = {rg['prob_up']:.1%} "
+              f"vs base {rg.get('base_rate', 0.5):.1%} (edge {rg.get('edge', 0):+.1%})"
+              f"  |  set on Monday {rg['based_on_monday']:%Y-%m-%d}  ({cal})")
+        print("NOTE: this stance has NOT shown walk-forward skill (AUC ~0.48 on "
+              "63 independent Mondays) -- informational only, never a gate.")
+        n = config.REGIME_N_RECOMMEND
+        short_mode = rg['stance'] == 'SHORT'
+        picks = (signals.nsmallest(n, 'p_up_7d') if short_mode
+                 else signals.nlargest(n, 'p_up_7d'))
+        print(f"Top {n} by P(7d {'DOWN' if short_mode else 'up'})"
+              + ("  [informational -- the pipeline trades LONG-ONLY; short "
+                 "backtests were net-negative]:" if short_mode else ":"))
+        for _, r in picks.iterrows():
+            p7 = 1 - r['p_up_7d'] if short_mode else r['p_up_7d']
+            print(f"  {r['Symbol']:<14} P(7d {'down' if short_mode else 'up'}) "
+                  f"{p7:.0%} | P(up 1d) {r['prob_up_1d']:.0%} | next-day band "
+                  f"{r['low_price']:,.6g} ~ {r['high_price']:,.6g}")
 
     return signals, plan, orders, meta
 

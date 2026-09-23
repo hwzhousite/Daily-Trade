@@ -65,11 +65,16 @@ def generate_signals(panel, top_n=None, prob_threshold=None, prev_holdings=None,
         mean, std = sel_model.predict_stats(_X('selection'))
         out['sel_score_7d'] = mean
         out['sel_std_7d'] = std
+        # P(7d return > 0) via the bag's disagreement (Gaussian approximation):
+        # the probability the regime cascade ranks recommendations by.
+        from scipy.stats import norm as _norm
+        out['p_up_7d'] = _norm.cdf(mean / (std + 1e-12))
         conf = {'tstat': mean / (std + 1e-12), 'lcb': mean - std}
         out['rank_score'] = conf.get(config.CONF_RANKING, mean)
     else:
         out['sel_score_7d'] = sel_model.predict(_X('selection'))
         out['sel_std_7d'] = np.nan
+        out['p_up_7d'] = np.nan
         out['rank_score'] = out['sel_score_7d']
     out['prob_up_1d'] = bundles['timing']['model'].predict_proba(_X('timing'))[:, 1]
 
@@ -132,6 +137,7 @@ def generate_signals(panel, top_n=None, prob_threshold=None, prev_holdings=None,
         'n_features': {n: len(b['features']) for n, b in bundles.items()},
         'conf_ranking': config.CONF_RANKING,
         'max_entries_per_day': config.MAX_ENTRIES_PER_DAY,
+        'health': bundles['selection'].get('health'),
     }
     return out, held, meta
 
