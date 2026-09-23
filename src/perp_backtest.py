@@ -26,7 +26,9 @@ def build_signal_frame(results):
     # t-stat ranking beat the raw mean +0.031 -> +0.038 RankIC at wf40.
     conf_col = {'tstat': 'prediction_tstat', 'lcb': 'prediction_lcb'}.get(config.CONF_RANKING)
     score_col = conf_col if conf_col and conf_col in sel_preds.columns else 'prediction'
-    sel = sel_preds[['Date', 'Symbol', score_col]].rename(columns={score_col: 'sel_score'})
+    keep = ['Date', 'Symbol', score_col] + \
+        (['target_ret_7d'] if 'target_ret_7d' in sel_preds.columns else [])
+    sel = sel_preds[keep].rename(columns={score_col: 'sel_score'})
     tim = results['timing']['wf_predictions'][
         ['Date', 'Symbol', 'prediction', 'target_ret_1d', 'funding_next_1d',
          'target_net_1d', 'Close']].rename(columns={'prediction': 'prob_up'})
@@ -149,13 +151,19 @@ def rule_buy_and_hold(symbol):
 
 # --- engine ----------------------------------------------------------------
 
-def simulate(signal_df, rule, cost_bps=None, charge_funding=True, **rule_kwargs):
+def simulate(signal_df, rule, cost_bps=None, charge_funding=True, exposure=None,
+             **rule_kwargs):
+    """`exposure` is an optional {date: multiplier} map (signal-health sizing)
+    applied to the rule's weights before accounting."""
     cost_bps = config.COST_BPS if cost_bps is None else cost_bps
     prev_w = {}
     rows = []
 
     for date, grp in signal_df.groupby('Date', sort=True):
         w = rule(grp, prev_weights=prev_w, **rule_kwargs)
+        if exposure is not None:
+            m = exposure.get(date, 1.0)
+            w = {s: wt * m for s, wt in w.items()}
         price_ret = dict(zip(grp['Symbol'], grp['target_ret_1d']))
         funding = dict(zip(grp['Symbol'], grp['funding_next_1d'].fillna(0.0)))
 
@@ -225,6 +233,16 @@ def run_all(signal_df, top_n=None, prob_threshold=None, cost_bps=None,
     curves = {label: simulate(signal_df, rule, cost_bps=cost_bps,
                               charge_funding=charge_funding, **kw)
               for label, (rule, kw) in specs.items()}
+
+    # Signal-health sizing on the default rule (needs the realized 7d label).
+    if config.USE_SIGNAL_HEALTH and 'target_ret_7d' in signal_df.columns:
+        import models as _M
+        h = _M.signal_health(signal_df, pred_col='sel_score')
+        curves['Sel + Hyst + Health'] = simulate(
+            signal_df, rule_selection_hysteresis, cost_bps=cost_bps,
+            charge_funding=charge_funding, exposure=h['multiplier'].to_dict(),
+            top_n=top_n, exit_rank_mult=exit_mult)
+
     summary = pd.DataFrame({k: metrics(v) for k, v in curves.items()}).T
     return summary, curves
 
@@ -243,6 +261,7 @@ def format_summary(summary):
 def plot_curves(curves, save_path=None, show=False, title=None):
     styles = {
         'Selection + Hysteresis':  dict(color='darkgreen', lw=2.5),
+        'Sel + Hyst + Health':     dict(color='black', lw=2.0),
         'Selection (daily rebal)': dict(color='seagreen', lw=1.5, ls='--'),
         'L/S 50-50 + Hysteresis':  dict(color='darkorange', lw=2.0),
         'L/S 50-50 (daily)':       dict(color='goldenrod', lw=1.3, ls='--'),

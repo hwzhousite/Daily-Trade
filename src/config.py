@@ -174,6 +174,21 @@ N_ENSEMBLE = 5             # bagged fits for the selection head (1 = single mode
 # The mean ranking is sticky, which is what a hysteresis strategy needs.
 CONF_RANKING = 'off'
 
+# --- Signal-health position sizing ------------------------------------------
+# The selection signal's rolling 12-month daily-IC t-stat is a live health
+# monitor: it averaged +4.0 in 2025 and collapsed to -1.3 in 2026, exactly the
+# year the strategy went flat. When the t-stat (lagged by the 7d label horizon,
+# so it is fully point-in-time) drops below the threshold, every position is
+# scaled by HEALTH_SCALE. Backtest: +97.7% -> +120.8%, MaxDD -63% -> -53%,
+# 2026 -7.9% -> +2.8%. The rule (threshold 1.0, scale 0.5) was specified
+# BEFORE the experiment that validated it.
+USE_SIGNAL_HEALTH = True
+HEALTH_WINDOW = 252         # rolling IC window, in daily bars
+HEALTH_MIN_PERIODS = 126    # below this the monitor abstains (full exposure)
+HEALTH_EMBARGO = 7          # ICs use the 7d label -> observable 7 bars later
+HEALTH_T_THRESHOLD = 1.0    # rolling t below this -> scale down
+HEALTH_SCALE = 0.5          # exposure multiplier while unhealthy
+
 # --- Strategy --------------------------------------------------------------
 TOP_N = 8                  # positions held from the selection ranking
 EXIT_RANK_MULT = 2         # hysteresis: sell only when a name leaves top N*mult

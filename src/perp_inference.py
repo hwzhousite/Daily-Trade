@@ -137,6 +137,7 @@ def generate_signals(panel, top_n=None, prob_threshold=None, prev_holdings=None,
         'n_features': {n: len(b['features']) for n, b in bundles.items()},
         'conf_ranking': config.CONF_RANKING,
         'max_entries_per_day': config.MAX_ENTRIES_PER_DAY,
+        'health': bundles['selection'].get('health'),
     }
     return out, held, meta
 

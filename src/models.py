@@ -271,6 +271,35 @@ def format_metrics(name, m):
             f"(t={m['ic_t_stat']:+.2f}) | hit {m['hit_rate']:.3f} | n={m['n']:,}")
 
 
+def signal_health(wf_preds, pred_col='prediction', window=None,
+                  min_periods=None, embargo=None):
+    """
+    Rolling t-stat of the selection signal's daily cross-sectional IC.
+
+    The IC at day d uses the 7d label, observable only at d+7 -- so the
+    series is shifted by `embargo` bars and the value AT day d is fully
+    point-in-time. Returns a frame [ic, roll_t, multiplier]; multiplier is
+    HEALTH_SCALE while roll_t < HEALTH_T_THRESHOLD, 1.0 otherwise (and 1.0
+    while the window is still warming up -- the monitor abstains).
+    """
+    window = window or config.HEALTH_WINDOW
+    min_periods = min_periods or config.HEALTH_MIN_PERIODS
+    embargo = embargo if embargo is not None else config.HEALTH_EMBARGO
+
+    ics = {}
+    for d, g in wf_preds.groupby('Date'):
+        if g[pred_col].nunique() > 1 and g['target_ret_7d'].nunique() > 1:
+            ics[d] = g[pred_col].rank().corr(g['target_ret_7d'].rank())
+    ic = pd.Series(ics).sort_index()
+    n = ic.rolling(window, min_periods=min_periods).count()
+    mu = ic.rolling(window, min_periods=min_periods).mean()
+    sd = ic.rolling(window, min_periods=min_periods).std()
+    t = (mu / (sd / np.sqrt(n))).shift(embargo)
+    mult = t.apply(lambda v: 1.0 if (pd.isna(v) or v >= config.HEALTH_T_THRESHOLD)
+                   else config.HEALTH_SCALE)
+    return pd.DataFrame({'ic': ic, 'roll_t': t, 'multiplier': mult})
+
+
 def fit_conformal(wf_preds, head, calib_days=None):
     """
     Conformal calibration for a quantile head.
@@ -390,7 +419,7 @@ def walk_forward(panel, head_name, features=None, wf_step=None, train_window=Non
 
 
 def fit_production(panel, head_name, features=None, params=None, save=True,
-                   conformal=None, wf_metrics=None, selector=None):
+                   conformal=None, wf_metrics=None, selector=None, health=None):
     """
     Fits on all available history and persists a bundle with its metadata.
 
@@ -441,18 +470,23 @@ def fit_production(panel, head_name, features=None, params=None, save=True,
         'n_symbols': int(df['Symbol'].nunique()),
         'conformal': conformal,
         'conformal_delta': (conformal or {}).get('delta', 0.0),
+        'health': health,
         'wf_metrics': wf_metrics,
     }
 
-    # A refit that skipped validation must not silently drop a calibration that
-    # an earlier validated run established.
-    if conformal is None and head['task'] == 'quantile':
+    # A refit that skipped validation must not silently drop a calibration or
+    # health reading that an earlier validated run established.
+    if (conformal is None and head['task'] == 'quantile') or \
+            (health is None and head_name == 'selection'):
         existing = config.model_path(head_name)
         if os.path.exists(existing):
             try:
                 prev = joblib.load(existing)
-                bundle['conformal'] = prev.get('conformal')
-                bundle['conformal_delta'] = prev.get('conformal_delta', 0.0)
+                if conformal is None and head['task'] == 'quantile':
+                    bundle['conformal'] = prev.get('conformal')
+                    bundle['conformal_delta'] = prev.get('conformal_delta', 0.0)
+                if health is None and head_name == 'selection':
+                    bundle['health'] = prev.get('health')
             except Exception:
                 pass
 
@@ -485,6 +519,7 @@ def train_all(panel, features=None, wf_step=None, params=None, verbose=True,
         preds = metrics = None
         conformal = None
 
+        health = None
         if validate:
             preds, metrics = walk_forward(panel, name, features=features,
                                           wf_step=wf_step, params=params, verbose=verbose)
@@ -496,10 +531,19 @@ def train_all(panel, features=None, wf_step=None, params=None, verbose=True,
                     print(f"      conformal delta {delta:+.5f} -> coverage "
                           f"{diag['raw_coverage']:.3f} => {diag['calibrated_coverage']:.3f} "
                           f"(target {diag['target_coverage']:.2f})")
+            if name == 'selection' and config.USE_SIGNAL_HEALTH:
+                h = signal_health(preds)
+                last = h.dropna(subset=['roll_t']).iloc[-1] if h['roll_t'].notna().any() else None
+                health = {'as_of': str(h.index[-1].date()),
+                          'roll_t': float(last['roll_t']) if last is not None else None,
+                          'multiplier': float(last['multiplier']) if last is not None else 1.0}
+                if verbose:
+                    print(f"      signal health: rolling t {health['roll_t']:+.2f} "
+                          f"-> exposure x{health['multiplier']:.2f}")
 
         bundle, importances = fit_production(panel, name, features=features,
                                              params=params, conformal=conformal,
-                                             wf_metrics=metrics)
+                                             wf_metrics=metrics, health=health)
         results[name] = {'wf_predictions': preds, 'wf_metrics': metrics,
                          'conformal': conformal, 'bundle': bundle,
                          'importances': importances}
