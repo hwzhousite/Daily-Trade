@@ -735,8 +735,11 @@ def fit_regime(panel, save=True, wf_metrics=None, wf_preds=None):
     if wf_preds is not None:
         calib = fit_market_calibration(
             wf_preds.rename(columns={'mkt_up_next_7d': 'mkt_up_next_1d'}))
+    base_rate = float((wf_metrics or {}).get('base_rate',
+                                             fit['mkt_up_next_7d'].mean()))
     bundle = {'model': m, 'head': 'regime', 'task': 'binary',
               'target': 'mkt_up_next_7d', 'features': feats, 'calib': calib,
+              'base_rate': base_rate,
               'lgb_params': dict(config.REGIME_PARAMS),
               'trained_at': pd.Timestamp.now(tz='UTC').isoformat(),
               'train_rows': int(len(fit)), 'wf_metrics': wf_metrics,
@@ -775,9 +778,18 @@ def regime_forecast(panel, bundle=None):
     row = mon.iloc[[-1]]
     raw = float(bundle['model'].predict_proba(row[bundle['features']])[0, 1])
     prob = float(apply_market_calibration(raw, bundle.get('calib')))
+    # The stance compares against the BASE RATE, not 0.5: in a history where
+    # most weeks were down, a calibrated output below 50% is normal, not a
+    # bear call. Within the neutral margin the honest answer is "no view".
+    base = float(bundle.get('base_rate', 0.5))
+    edge = prob - base
+    if abs(edge) < config.REGIME_NEUTRAL_MARGIN:
+        stance = 'NEUTRAL'
+    else:
+        stance = 'LONG' if edge > 0 else 'SHORT'
     return {'as_of': frame.index[-1], 'based_on_monday': mon.index[-1],
-            'prob_up': prob, 'prob_up_raw': raw,
-            'stance': 'LONG' if prob >= 0.5 else 'SHORT',
+            'prob_up': prob, 'prob_up_raw': raw, 'base_rate': base,
+            'edge': edge, 'stance': stance,
             'calibrated': bundle.get('calib') is not None,
             'wf_metrics': bundle.get('wf_metrics')}
 

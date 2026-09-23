@@ -155,6 +155,7 @@ REGIME_PARAMS = dict(
     random_state=42, n_jobs=-1, verbosity=-1,
 )
 REGIME_TRAIN_WEEKS = 78    # rolling training window, in Mondays (~1.5y)
+REGIME_NEUTRAL_MARGIN = 0.02  # |prob - base rate| below this -> NEUTRAL stance
 REGIME_N_RECOMMEND = 3     # coins recommended per day by the regime cascade
 
 # --- Selection ensemble & confidence ---------------------------------------

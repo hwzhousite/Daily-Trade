@@ -126,19 +126,21 @@ def tonight(panel, top_n=None, capital=None, use_timing_gate=None,
         cal = (f"walk-forward Brier {wfm['brier']:.3f}, base {wfm['base_rate']:.1%}, "
                f"{wfm.get('n', '?')} independent Mondays"
                if wfm else "not walk-forward validated yet; run `backtest`")
-        print(f"Week's stance: {rg['stance']}  |  P(up over 7d) = {rg['prob_up']:.1%}"
+        print(f"Week's stance: {rg['stance']}  |  P(up over 7d) = {rg['prob_up']:.1%} "
+              f"vs base {rg.get('base_rate', 0.5):.1%} (edge {rg.get('edge', 0):+.1%})"
               f"  |  set on Monday {rg['based_on_monday']:%Y-%m-%d}  ({cal})")
+        print("NOTE: this stance has NOT shown walk-forward skill (AUC ~0.48 on "
+              "63 independent Mondays) -- informational only, never a gate.")
         n = config.REGIME_N_RECOMMEND
-        if rg['stance'] == 'LONG':
-            picks = signals.nlargest(n, 'p_up_7d')
-            print(f"Top {n} by P(7d up):")
-        else:
-            picks = signals.nsmallest(n, 'p_up_7d')
-            print(f"Top {n} by P(7d DOWN)  [informational -- the pipeline "
-                  f"trades LONG-ONLY; short backtests were net-negative]:")
+        short_mode = rg['stance'] == 'SHORT'
+        picks = (signals.nsmallest(n, 'p_up_7d') if short_mode
+                 else signals.nlargest(n, 'p_up_7d'))
+        print(f"Top {n} by P(7d {'DOWN' if short_mode else 'up'})"
+              + ("  [informational -- the pipeline trades LONG-ONLY; short "
+                 "backtests were net-negative]:" if short_mode else ":"))
         for _, r in picks.iterrows():
-            p7 = r['p_up_7d'] if rg['stance'] == 'LONG' else 1 - r['p_up_7d']
-            print(f"  {r['Symbol']:<14} P(7d {'up' if rg['stance']=='LONG' else 'down'}) "
+            p7 = 1 - r['p_up_7d'] if short_mode else r['p_up_7d']
+            print(f"  {r['Symbol']:<14} P(7d {'down' if short_mode else 'up'}) "
                   f"{p7:.0%} | P(up 1d) {r['prob_up_1d']:.0%} | next-day band "
                   f"{r['low_price']:,.6g} ~ {r['high_price']:,.6g}")
 
