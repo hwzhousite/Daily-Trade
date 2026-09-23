@@ -54,8 +54,7 @@ def train(panel, wf_step=None, validate=True, verbose=True):
     if validate:
         mkt_preds, mkt_metrics = M.walk_forward_market(panel, wf_step=wf_step,
                                                        verbose=verbose)
-        rg_preds, rg_metrics = M.walk_forward_regime(panel, wf_step=wf_step,
-                                                     verbose=verbose)
+        rg_preds, rg_metrics = M.walk_forward_regime(panel, verbose=verbose)
     results['market'] = {'bundle': M.fit_market(panel, wf_metrics=mkt_metrics,
                                                 wf_preds=mkt_preds),
                          'wf_metrics': mkt_metrics}
@@ -122,13 +121,13 @@ def tonight(panel, top_n=None, capital=None, use_timing_gate=None,
     # --- regime cascade: 7d stance -> 3 recommendations -> next-day bands ---
     rg = M.regime_forecast(panel)
     if rg and 'p_up_7d' in signals.columns and signals['p_up_7d'].notna().any():
-        banner("Regime cascade (7d stance from BTC/ETH/SOL)")
+        banner("Regime cascade (weekly stance from BTC/ETH/SOL, set each Monday)")
         wfm = rg.get('wf_metrics') or {}
         cal = (f"walk-forward Brier {wfm['brier']:.3f}, base {wfm['base_rate']:.1%}, "
-               f"~{wfm.get('n_effective', '?')} effective samples"
+               f"{wfm.get('n', '?')} independent Mondays"
                if wfm else "not walk-forward validated yet; run `backtest`")
-        print(f"7d market stance: {rg['stance']}  |  P(up next 7d) = "
-              f"{rg['prob_up']:.1%}  ({cal})")
+        print(f"Week's stance: {rg['stance']}  |  P(up over 7d) = {rg['prob_up']:.1%}"
+              f"  |  set on Monday {rg['based_on_monday']:%Y-%m-%d}  ({cal})")
         n = config.REGIME_N_RECOMMEND
         if rg['stance'] == 'LONG':
             picks = signals.nlargest(n, 'p_up_7d')

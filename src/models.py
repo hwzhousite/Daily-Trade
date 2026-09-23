@@ -684,18 +684,26 @@ def regime_feature_cols(frame):
     return [c for c in frame.columns if c not in ('mkt_ret_next_7d', 'mkt_up_next_7d')]
 
 
-def walk_forward_regime(panel, wf_step=None, train_window=None, verbose=True):
-    """Walk-forward with a 7-DAY embargo: the 7d label overlaps rows."""
-    wf_step = wf_step or config.WF_STEP
-    train_window = train_window or config.TRAIN_WINDOW
+def _monday_rows(frame):
+    return frame[frame.index.dayofweek == 0]
+
+
+def walk_forward_regime(panel, train_weeks=None, verbose=True, **_):
+    """
+    MONDAYS ONLY: the head is fitted and evaluated on Monday rows, whose 7d
+    labels run Monday-to-Monday and therefore do NOT overlap -- every test
+    point is independent. Weekly refit (the model is tiny), 1-Monday embargo.
+    """
+    train_weeks = train_weeks or config.REGIME_TRAIN_WEEKS
     frame = build_regime_frame(panel).dropna(subset=['mkt_up_next_7d'])
+    mon = _monday_rows(frame)
     feats = regime_feature_cols(frame)
 
     folds = []
-    for i in range(train_window + 7, len(frame), wf_step):
-        tr = frame.iloc[i - 7 - train_window: i - 7]
-        te = frame.iloc[i: i + wf_step].copy()
-        if tr.empty or te.empty or tr['mkt_up_next_7d'].nunique() < 2:
+    for i in range(train_weeks + 1, len(mon)):
+        tr = mon.iloc[i - 1 - train_weeks: i - 1]
+        te = mon.iloc[[i]].copy()
+        if tr['mkt_up_next_7d'].nunique() < 2:
             continue
         m = LGBMClassifier(objective='binary', **config.REGIME_PARAMS)
         m.fit(tr[feats], tr['mkt_up_next_7d'])
@@ -704,22 +712,21 @@ def walk_forward_regime(panel, wf_step=None, train_window=None, verbose=True):
 
     preds = pd.concat(folds)
     y, pr = preds['mkt_up_next_7d'].values, preds['prediction'].values
-    out = {'n': int(len(preds)),
-           'n_effective': int(len(preds) / 7),   # overlapping 7d labels
+    out = {'n': int(len(preds)),          # independent Mondays
            'auc': float(roc_auc_score(y, pr)) if len(np.unique(y)) > 1 else np.nan,
            'brier': float(brier_score_loss(y, pr)),
            'base_rate': float(np.mean(y)), 'mean_pred': float(np.mean(pr))}
     if verbose:
-        print(f"  [regime7d] AUC {out['auc']:.4f} | Brier {out['brier']:.4f} | "
+        print(f"  [regime-weekly] AUC {out['auc']:.4f} | Brier {out['brier']:.4f} | "
               f"base {out['base_rate']:.3f} vs pred {out['mean_pred']:.3f} | "
-              f"n={out['n']:,} (~{out['n_effective']} effective)  ({len(folds)} folds)")
+              f"n={out['n']} independent Mondays")
     return preds, out
 
 
 def fit_regime(panel, save=True, wf_metrics=None, wf_preds=None):
     """Production regime head with Platt calibration from the walk-forward."""
     frame = build_regime_frame(panel)
-    fit = frame.dropna(subset=['mkt_up_next_7d'])
+    fit = _monday_rows(frame.dropna(subset=['mkt_up_next_7d']))
     feats = regime_feature_cols(frame)
     m = LGBMClassifier(objective='binary', **config.REGIME_PARAMS)
     m.fit(fit[feats], fit['mkt_up_next_7d'])
@@ -752,17 +759,24 @@ def fit_regime(panel, save=True, wf_metrics=None, wf_preds=None):
 
 
 def regime_forecast(panel, bundle=None):
-    """P(market up over the next 7 days) and the implied stance."""
+    """
+    The week's stance: predicted from the MOST RECENT MONDAY's features and
+    held fixed until the next Monday, as the weekly prior the cascade uses.
+    """
     if bundle is None:
         path = str(config.model_path('regime'))
         if not os.path.exists(path):
             return None
         bundle = joblib.load(path)
     frame = build_regime_frame(panel)
-    last = frame.iloc[[-1]]
-    raw = float(bundle['model'].predict_proba(last[bundle['features']])[0, 1])
+    mon = _monday_rows(frame)
+    if mon.empty:
+        return None
+    row = mon.iloc[[-1]]
+    raw = float(bundle['model'].predict_proba(row[bundle['features']])[0, 1])
     prob = float(apply_market_calibration(raw, bundle.get('calib')))
-    return {'as_of': frame.index[-1], 'prob_up': prob, 'prob_up_raw': raw,
+    return {'as_of': frame.index[-1], 'based_on_monday': mon.index[-1],
+            'prob_up': prob, 'prob_up_raw': raw,
             'stance': 'LONG' if prob >= 0.5 else 'SHORT',
             'calibrated': bundle.get('calib') is not None,
             'wf_metrics': bundle.get('wf_metrics')}

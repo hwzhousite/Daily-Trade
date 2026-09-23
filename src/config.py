@@ -142,17 +142,19 @@ MARKET_PARAMS = dict(
     random_state=42, n_jobs=-1, verbosity=-1,
 )
 
-# --- Regime head (7d market direction) --------------------------------------
-# Date-level P(equal-weight market up over the NEXT 7 DAYS), driven by the
-# BTC/ETH/SOL leader states. The 7d label overlaps across consecutive rows,
-# so the effective sample is ~1/7th of the row count: the tree stays tiny and
-# the walk-forward carries a 7-day embargo like the selection head.
+# --- Regime head (weekly 7d market direction) --------------------------------
+# MONDAYS ONLY: each Monday the head predicts P(equal-weight market up over
+# the next 7 days) from the BTC/ETH/SOL leader states, and that stance is the
+# prior for the whole week. Monday-to-Monday labels do NOT overlap, so every
+# sample is independent -- but there are only ~140 Mondays in the history,
+# hence the near-degenerate tree size.
 REGIME_PARAMS = dict(
-    n_estimators=200, learning_rate=0.03, num_leaves=7, max_depth=3,
-    min_child_samples=25, subsample=0.8, subsample_freq=1,
+    n_estimators=150, learning_rate=0.05, num_leaves=3, max_depth=2,
+    min_child_samples=8, subsample=0.8, subsample_freq=1,
     colsample_bytree=0.6, reg_alpha=0.5, reg_lambda=3.0,
     random_state=42, n_jobs=-1, verbosity=-1,
 )
+REGIME_TRAIN_WEEKS = 78    # rolling training window, in Mondays (~1.5y)
 REGIME_N_RECOMMEND = 3     # coins recommended per day by the regime cascade
 
 # --- Selection ensemble & confidence ---------------------------------------
