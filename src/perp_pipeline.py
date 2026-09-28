@@ -133,11 +133,22 @@ def tonight(panel, top_n=None, capital=None, use_timing_gate=None,
               f"  |  set on Monday {rg['based_on_monday']:%Y-%m-%d}  ({cal})")
         print("NOTE: this stance has NOT shown walk-forward skill (AUC ~0.48 on "
               "63 independent Mondays) -- informational only, never a gate.")
+        # --- Monday-frozen weekly top-3 (P over the week, fixed all week) ---
+        wk = pi.weekly_picks(signals, meta['as_of'], save=save_plan)
+        if wk:
+            print(f"本周榜单 (frozen on Monday {wk['monday']}, ranked by P(7d up)):")
+            for pk in wk['picks']:
+                print(f"  {pk['symbol']:<14} P(7d up) {pk['p_up_7d']:.0%} | "
+                      f"P(up 1d) {pk['p_up_1d']:.0%} | ref close {pk['ref_close']:,.6g}")
+        else:
+            print("本周榜单: 未生成 -- 本周处理 UTC 周一 bar 的那晚(北京周二早)未运行")
+
+        # --- today's refreshed top-3 ---
         n = config.REGIME_N_RECOMMEND
         short_mode = rg['stance'] == 'SHORT'
         picks = (signals.nsmallest(n, 'p_up_7d') if short_mode
                  else signals.nlargest(n, 'p_up_7d'))
-        print(f"Top {n} by P(7d {'DOWN' if short_mode else 'up'})"
+        print(f"今日榜单 top {n} by P(7d {'DOWN' if short_mode else 'up'})"
               + ("  [informational -- the pipeline trades LONG-ONLY; short "
                  "backtests were net-negative]:" if short_mode else ":"))
         for _, r in picks.iterrows():

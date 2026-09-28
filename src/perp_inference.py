@@ -142,6 +142,52 @@ def generate_signals(panel, top_n=None, prob_threshold=None, prev_holdings=None,
     return out, held, meta
 
 
+def weekly_picks(signals, as_of, save=True, store_path=None):
+    """
+    The Monday-frozen weekly top-3 by P(7d up).
+
+    On the night that processes the UTC-Monday bar (Tuesday 08:00 Beijing),
+    the top REGIME_N_RECOMMEND names by p_up_7d are FROZEN for the week and
+    persisted, so later nights show the same list even though nightly refits
+    drift the scores. Returns the stored dict, or None when this week's
+    Monday bar was never processed (e.g. the pipeline skipped that night).
+    """
+    import json
+    import os as _os
+
+    as_of = pd.Timestamp(as_of).normalize()
+    monday = as_of - pd.Timedelta(days=int(as_of.dayofweek))
+    store_path = str(store_path or (config.OUTPUT_DIR / 'weekly_picks.json'))
+
+    stored = None
+    if _os.path.exists(store_path):
+        try:
+            with open(store_path) as fh:
+                stored = json.load(fh)
+        except Exception:
+            stored = None
+    if stored and stored.get('monday') == str(monday.date()):
+        return stored
+
+    if as_of == monday and signals['p_up_7d'].notna().any():
+        top = signals.nlargest(config.REGIME_N_RECOMMEND, 'p_up_7d')
+        data = {'monday': str(monday.date()),
+                'frozen_at_bar': str(as_of.date()),
+                'picks': [{'symbol': r['Symbol'],
+                           'p_up_7d': round(float(r['p_up_7d']), 4),
+                           'p_up_1d': round(float(r['prob_up_1d']), 4),
+                           'ref_close': float(r['Close'])}
+                          for _, r in top.iterrows()]}
+        if save:
+            _os.makedirs(_os.path.dirname(store_path), exist_ok=True)
+            tmp = f'{store_path}.tmp'
+            with open(tmp, 'w') as fh:
+                json.dump(data, fh, indent=1)
+            _os.replace(tmp, store_path)
+        return data
+    return None
+
+
 def format_signals(signals, n=None):
     """The nightly forecast table: probability of up, and the price band."""
     df = signals if n is None else signals.head(n)
