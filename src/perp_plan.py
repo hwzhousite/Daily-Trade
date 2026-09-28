@@ -120,8 +120,11 @@ def plan_summary(plan, meta):
     turnover = float(plan['Delta_Weight'].abs().sum())
     cap = float(plan['Capital'].iloc[0])
     conf = meta.get('conformal', {})
+    close_local = config.bar_close_local(meta['as_of'])
     return {
-        'As of (UTC bar close)': f"{pd.Timestamp(meta['as_of']).date()}",
+        'As of': f"{pd.Timestamp(meta['as_of']).date()} UTC bar, "
+                 f"closed {close_local:%m-%d %H:%M} 北京时间",
+        'Generated': f"{config.now_local():%Y-%m-%d %H:%M} 北京时间",
         'Universe': f"{meta['n_universe']} symbols",
         'Rule': f"top {meta['top_n']}, exit below rank {meta['top_n']*meta['exit_rank_mult']}"
                 + ("  + P(up) gate" if meta['use_timing_gate'] else "  (timing gate OFF)"),

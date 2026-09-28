@@ -104,7 +104,9 @@ def tonight(panel, top_n=None, capital=None, use_timing_gate=None,
 
     nf = meta['n_features']
     nf_txt = '/'.join(str(v) for v in nf.values()) if isinstance(nf, dict) else str(nf)
-    print(f"as of {pd.Timestamp(meta['as_of']).date()} (UTC bar close) | "
+    close_local = config.bar_close_local(meta['as_of'])
+    print(f"as of {pd.Timestamp(meta['as_of']).date()} UTC bar "
+          f"(closed {close_local:%Y-%m-%d %H:%M} 北京时间) | "
           f"{meta['n_universe']} symbols | {nf_txt} features per head")
     print(f"\n--- Next-day forecast (top {top_show} by 7d selection score) ---")
     print(pi.format_signals(signals, top_show).to_string(index=False))

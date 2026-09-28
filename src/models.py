@@ -464,7 +464,7 @@ def fit_production(panel, head_name, features=None, params=None, save=True,
         'alpha': head.get('alpha'), 'features': features,
         'selector': selector, 'n_features_raw': n_features_raw,
         'lgb_params': dict(params),
-        'trained_at': pd.Timestamp.now(tz='UTC').isoformat(),
+        'trained_at': config.now_local().isoformat(),
         'train_rows': int(len(df)),
         'train_end': pd.Timestamp(df['Date'].max()).isoformat(),
         'n_symbols': int(df['Symbol'].nunique()),
@@ -656,7 +656,7 @@ def fit_market(panel, save=True, wf_metrics=None, wf_preds=None):
     bundle = {'model': m, 'head': 'market', 'task': 'binary',
               'target': 'mkt_up_next_1d', 'features': feats,
               'lgb_params': dict(config.MARKET_PARAMS), 'calib': calib,
-              'trained_at': pd.Timestamp.now(tz='UTC').isoformat(),
+              'trained_at': config.now_local().isoformat(),
               'train_rows': int(len(fit)), 'wf_metrics': wf_metrics,
               'train_end': pd.Timestamp(fit.index.max()).isoformat()}
     # A nightly refit without validation must not drop an existing calibration.
@@ -785,7 +785,7 @@ def fit_regime(panel, save=True, wf_metrics=None, wf_preds=None):
               'target': 'mkt_up_next_7d', 'features': feats, 'calib': calib,
               'base_rate': base_rate,
               'lgb_params': dict(config.REGIME_PARAMS),
-              'trained_at': pd.Timestamp.now(tz='UTC').isoformat(),
+              'trained_at': config.now_local().isoformat(),
               'train_rows': int(len(fit)), 'wf_metrics': wf_metrics,
               'train_end': pd.Timestamp(fit.index.max()).isoformat()}
     if calib is None:

@@ -14,7 +14,7 @@ CryptoQuantPipeline -- Binance USDT perpetuals.
     python main.py signals        # forecast from the saved models, no refit
     python main.py tune           # per-head random search on IC-filtered features
 
-Run `nightly` after 00:15 UTC so the previous UTC day's bar is closed.
+Run `nightly` after 08:15 北京时间 (00:15 UTC) so the previous UTC bar is closed.
 All paths come from src/config.py and are anchored to this file's directory.
 """
 import argparse

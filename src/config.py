@@ -39,6 +39,25 @@ def plan_path(as_of):
     return PLANS_DIR / f'plan_{as_of:%Y-%m-%d}.csv'
 
 
+# --- Timezone ---------------------------------------------------------------
+# Human-facing display timezone (东八区). DATA STAYS UTC: Binance daily bars
+# and funding settle on the UTC clock, so every bar date, label and plan
+# As_Of keeps the UTC convention -- a UTC bar dated D closes at D+1 08:00
+# Beijing time. Only reports, timestamps and operational guidance convert.
+TIMEZONE = 'Asia/Shanghai'
+import pandas as _pd
+
+
+def now_local():
+    return _pd.Timestamp.now(tz=TIMEZONE)
+
+
+def bar_close_local(bar_date):
+    """When the UTC daily bar dated `bar_date` actually closed, in TIMEZONE."""
+    close_utc = (_pd.Timestamp(bar_date) + _pd.Timedelta(days=1)).tz_localize('UTC')
+    return close_utc.tz_convert(TIMEZONE)
+
+
 # --- Universe --------------------------------------------------------------
 EXCHANGE = 'binance_perp'
 UNIVERSE_SIZE = 50          # top N USDT perps by 24h quote volume
